@@ -1,8 +1,8 @@
 # The skin microbiome of patients with atopic dermatitis normalizes gradually during treatment
 
 #### Veda D. Khadka*, Felix Michael Key*, Carolina Romo-González, Adrián Martínez-Gayosso, Blanca L Campos-Cabrera, Armando Gerónimo-Gallegos, Tucker C Lynn, Carola Durán-Mckinster, Rafael Coria Jimenez, Tami D Lieberman**, and Maria Teresa García-Romero**
- '*' First author(s) <br>
-'**' Last author(s)
+ '*' First authors <br>
+'**' Last authors
 
 Original Research, Front. Cell. Infect. Microbiol. - Microbiome in Health and Disease
 
