@@ -24,7 +24,7 @@ Conclusions: There are clear differences in the skin microbiome of healthy contr
   <ul>
   <li> Qiime2 bash script named "qiime2_dataprocessing.sh". Run this script on raw sequencing data to get the ball rolling. </li>
   <li> Metadata table required by <a href = "https://qiime2.org/"> Qiime2 </a> named "metatable_sra_16s_public.tsv"  </li>
-  <li> Classifier trained on <a href = "https://www.arb-silva.de/" > Sliva </a> ASVs, required by Qiime2 script named "classifier.qza.gz" </li>
+  <li> Classifier trained on <a href = "https://www.arb-silva.de/" > Sliva </a> ASVs, required by Qiime2 script named "classifier.qza.gz". This classifier is based on a cleaned database of Staphylococcus, enabling species-level ID of Staphylococcus from V1-V3 amplicons </li>
   </ul> <br>
  <li> <strong> R_Analysis </strong> </li> 
  R workflow for analysing Qiime2 output (level-7) <br>
