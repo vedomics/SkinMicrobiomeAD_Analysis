@@ -22,7 +22,7 @@ Conclusions: There are clear differences in the skin microbiome of healthy contr
 <ul>
   <li> <strong> Qiime2_Analysis </strong> </li>
   <ul>
-  <li> Qiime2 bash script named "qiime2_dataprocessing.sh" </li>
+  <li> Qiime2 bash script named "qiime2_dataprocessing.sh". Run this script on raw sequencing data to get the ball rolling. </li>
   <li> Metadata table required by <a href = "https://qiime2.org/"> Qiime2 </a> named "metatable_sra_16s_public.tsv"  </li>
   <li> Classifier trained on <a href = "https://www.arb-silva.de/" > Sliva </a> ASVs, required by Qiime2 script named "classifier.qza.gz" </li>
   </ul> <br>
@@ -30,7 +30,7 @@ Conclusions: There are clear differences in the skin microbiome of healthy contr
  R workflow for analysing Qiime2 output (level-7) <br>
   <ul>
    <li> Functions for running R scripts, named "16StaphAD_functions.R" </li>
-   <li> Code for preprocessing Qiime2 output, named "Preprocessing_QC.Rmd" </li>
+   <li> Code for preprocessing Qiime2 output, named "Preprocessing_QC.Rmd". Run this script on the Qiime2 output generated above. </li>
    <li> Code for generating figures from the paper, named "Figure_Generation.Rmd" </li> <br>
  <li> <strong> Data files </strong> </li>
 Qiime2 output necessary for running R preprocessing and figure generation script:
