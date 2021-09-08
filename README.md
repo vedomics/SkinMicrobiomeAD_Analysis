@@ -1,5 +1,11 @@
 # The skin microbiome of patients with atopic dermatitis normalizes gradually during treatment
 
+#### Veda D. Khadka*, Felix Michael Key*, Carolina Romo-González, Adrián Martínez-Gayosso, Blanca L Campos-Cabrera, Armando Gerónimo-Gallegos, Tucker C Lynn, Carola Durán-Mckinster, Rafael Coria Jimenez, Tami D Lieberman**, and Maria Teresa García-Romero**
+ '*' First author(s) <br>
+'**' Last author(s)
+
+Original Research, Front. Cell. Infect. Microbiol. - Microbiome in Health and Disease
+
 Background: Atopic dermatitis (AD) is characterized by an altered skin microbiome dominantly colonised by S. aureus. Standard treatment includes emollients, anti-inflammatory medications and antiseptics.
 Objectives: To characterize changes in the skin microbiome during treatment for AD.
 
@@ -9,13 +15,18 @@ Results: We included 14 healthy controls and 28 patients. We found high relative
 
 Conclusions: There are clear differences in the skin microbiome of healthy controls and AD patients that diminish with treatment. After three months, the addition of DBB to standard treatment had significantly decreased the S. aureus burden, supporting its use as a therapeutic option. Further study in double-blinded trials is needed
 
+ <a href = "https://www.ncbi.nlm.nih.gov/bioproject/759575"> Sequence data can be found here </a>
+
 ## Included: 
 
 <ul>
-
-  <li> Qiime2 bash script </li>
-  <li> Metadata table required by Qiime2 </li>
-  <li> Classifier trained on Sliva ASVs, required by Qiime2 script </li>
+  <li> <strong> Qiime2_Analysis </strong> </li>
+  <ul>
+  <li> Qiime2 bash script named "qiime2_dataprocessing.sh" </li>
+  <li> Metadata table required by <a href = "https://qiime2.org/"> Qiime2 </a> named "metatable_sra_16s_public.tsv"  </li>
+  <li> Classifier trained on <a href = "https://www.arb-silva.de/" > Sliva </a> ASVs, required by Qiime2 script named " </li>
+  </ul>
   <li> R workflow for analysing Qiime2 output (level-7) </li>
+ 
 
 </ul>
