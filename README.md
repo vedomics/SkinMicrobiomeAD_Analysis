@@ -31,12 +31,13 @@ Conclusions: There are clear differences in the skin microbiome of healthy contr
   <ul>
    <li> Functions for running R scripts, named "16StaphAD_functions.R" </li>
    <li> Code for preprocessing Qiime2 output, named "Preprocessing_QC.Rmd" </li>
-   <li> Code for generating figures from the paper, named "Figure_Generation.Rmd" </li>
- </ul> <br> 
+   <li> Code for generating figures from the paper, named "Figure_Generation.Rmd" </li> <br>
  <li> <strong> Data files </strong> </li>
 Qiime2 output necessary for running R preprocessing and figure generation script:
   <ul>
    <li> "level-7.csv" </li>
-  </ul>
-  Other .csv files in this folder are dataframes generated through the "Preprocessing_QC.Rmd" script. You may use these dataframes in lieu of creating them yourself in the Figure_Generation.Rmd script. 
+   <li> Other .csv files in this folder are dataframes generated through the "Preprocessing_QC.Rmd" script. You may use these dataframes in lieu of creating them yourself in the Figure_Generation.Rmd script. </li>
+   </ul> 
+  </ul> 
+  
 </ul>
