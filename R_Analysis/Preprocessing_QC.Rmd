@@ -1,0 +1,603 @@
+---
+title: "PreProcessing for The skin microbiome of patients with atopic dermatitis normalizes gradually during treatment (Frontiers 2021)"
+author: "VK"
+date: "11/3/2020"
+output: rmarkdown::github_document
+---
+
+## Initialise
+
+This is our preprocessing file that contains finalised quality and sample filtering parameters and no unnecessary figures. 
+
+Some conventions:
+
+* "{}.norm" refers to a renormalised abundance table
+* "{}_complete" refers to a abundance table with both samples and BLANKS and extraction controls
+
+### Set defaults 
+
+```{r, warning=FALSE, message=FALSE}
+
+library("plyr")
+library("reshape2")
+library("gridExtra")
+library("ggplot2")
+library("ggrepel")
+library("scales")
+library("ggsci")
+library("forcats")
+library("ggsignif")
+library("RColorBrewer")
+library("phyloseq")
+library("ggcorrplot")
+library("vegan")
+library("cowplot")
+library("matrixStats")
+library("ggsignif")
+library("ggfortify")
+library("stringr")
+
+'%!in%' = function(x,y)!('%in%'(x,y))
+theme_set(theme_minimal())
+
+file_dir = "./data_files"
+
+source("./16StaphAD_functions.R")
+
+```
+
+## Create raw OTU table and metadata file
+
+```{r}
+#Don't execute this code if you can import files instead
+
+d = read.csv(paste(file_dir, "level-7.csv", sep = "/"), row.names = 1, stringsAsFactors = FALSE)
+data <- d[,1:(ncol(d)-12)] # last 12 columns are metadata
+meta <- d[,(ncol(d)-11):ncol(d)]
+
+## turn read count to frequency
+
+dfreq <- data
+for (i in 1:nrow(dfreq)){ dfreq[i,] <- dfreq[i,]/sum(dfreq[i,]) } # Convert to frequencies 
+
+#Write to file so you can just import it later
+write.csv(dfreq, paste(file_dir, "dfreq.csv", sep = "/"))
+write.csv(meta, paste(file_dir, "meta.csv", sep = "/"))
+write.csv(data, paste(file_dir, "data.csv", sep = "/"))
+```
+
+
+## Set up our OTU table and metadata file --remove all controls except for extraction blanks
+
+```{r}
+
+#Import files instead of re-generating
+ 
+data = read.csv(paste(file_dir, "data.csv", sep = "/"), header=TRUE, row.names = 1)
+dfreq = read.csv(paste(file_dir, "dfreq.csv", sep = "/"), header=TRUE, row.names = 1) 
+meta = read.csv(paste(file_dir, "meta.csv", sep = "/"), header=TRUE, row.names = 1)
+
+site_meta = read.csv(paste(file_dir, "site_specific_scorad.csv", sep = "/"), header=TRUE)
+
+#Add a relative scorad column 
+meta = cbind(meta,(meta[,'ScoradTotal']/max(meta[,'ScoradTotal'],na.rm=T)))
+colnames(meta)[ncol(meta)] <- 'ScoradRelative'
+
+#Fixing metadata -- largely unnecessary, but i'm leaving in as a safegaurd
+
+bodysite_label_dict = list("CD" = "Right_elbow", "RD" = "Right_knee", "AD"="Right_forearm", "CI" = "Left_elbow", "RI" = "Left_knee", "AI" = "Left_forearm", "C" = "elbow", "R" = "knee", "A" = "forearm", "N" = "nares", "De" = "Active_dermatitis_area", "D" = "Active_dermatitis_area", "DE" = "Active_dermatitis_area" )
+
+meta$SampleName = sapply(rownames(meta), function(x) {substr(x, 1, nchar(x) -4)})
+meta$Body_Site = sapply(meta$SampleName, function(x) {ifelse(gsub('[[:digit:]]+', '', x) %in% names(bodysite_label_dict), bodysite_label_dict[gsub('[[:digit:]]+', '', x)], x)})
+meta$Body_Site = as.character(meta$Body_Site)
+
+# add in site-specific scorad to metadata file -- we will need this file later when we merge biological replicates
+
+site_meta$Body_Site = sapply(site_meta$Site, function(x) {ifelse(gsub('[[:digit:]]+', '', x) %in% names(bodysite_label_dict), bodysite_label_dict[gsub('[[:digit:]]+', '', x)], x)}) #this code is *chefs kiss*
+
+mocks = rownames(subset(meta, startsWith(SampleName, "MOCK")))
+
+controls_to_be_removed = unique(mocks)
+
+dfreq = dfreq[!rownames(dfreq) %in% controls_to_be_removed,]
+meta = meta[!rownames(meta) %in% controls_to_be_removed,]
+data = data[!rownames(data) %in% controls_to_be_removed,]
+
+#why dont we have an even number of rows?
+
+splIDs <- substr(rownames(dfreq),1,nchar(rownames(dfreq))-4) #get sample IDs
+
+#Create an OTU table that lacks extraction controls (blanks), so that we can do filtering without these samples
+
+blanks = rownames(subset(meta, startsWith(SampleName, "BLANK")))
+
+# write.csv(as.data.frame(c(controls_to_be_removed, blanks)), paste(file_dir, "controls_removed.csv", sep = '/'))
+
+dfreq_complete = dfreq #this will be our otu table with all samples
+data_complete = data
+meta_complete = meta
+
+dfreq = dfreq[!rownames(dfreq) %in% blanks,] #remove blanks from dfreq
+dfreq = dfreq[,colSums(dfreq) != 0]
+
+#Repeat for our raw reads
+
+data = data[!rownames(data) %in% blanks,] #remove blanks from dfreq
+data = data[,colSums(data) != 0]
+
+#Repeat for metadata file
+meta = meta[!rownames(meta) %in% blanks,] #remove blanks from meta
+
+# write.csv(meta, paste(file_dir, "meta_clean_noblanks.csv", sep = "/"))
+
+
+```
+
+## Covariate removal
+
+Remove covariates and look at differences between pools after this first step of contam removal. Assess basic metrics about dataset (seq depth, relative abundace) before and after covariate contaminant removal. FMK showed in an earlier analysis that delftia and pseudomonas were major contributor to batch effects between plates. We are also removing cyanobacteria, since they are likely to be contaminants from swabbing. 
+
+```{r}
+
+# Assess PCoA of all samples to see high-level structure
+
+df_ps = coerce_to_phyloseq(dfreq, meta)
+df_ord = ordinate(df_ps, "RDA")
+plot_ordination(df_ps, df_ord, color = "PlateID") # There's clearly a TON of structure here. can we resolve it?
+
+cor_data = plot_ordination(df_ps, df_ord, color = "PlateID")$data
+
+#Do the first step of contaminant removal - remove covariates.
+
+d.cor <- cor(data)
+d.cor <- round(100*d.cor,0) # get values 0:100 and without decimals
+
+#Sort is default in ascending order, hence the rev() below
+sort_name_vec <- names(sort(d.cor[,"Bacteria.Proteobacteria.Gammaproteobacteria.Betaproteobacteriales.Burkholderiaceae.Delftia.__"])) 
+
+#We also want to remove any reads that come from cyanobacteria, since these are contams
+
+cyanobacteria_indices = grep("Cyanobacteria", sort_name_vec)
+cyanobacteria_otus = sort_name_vec[cyanobacteria_indices]
+
+#Vector with taxa to remove 
+unwanted_taxa = c(rev(sort_name_vec)[1:8], "Bacteria.Proteobacteria.Gammaproteobacteria.Pseudomonadales.Pseudomonadaceae.Pseudomonas.__", cyanobacteria_otus)
+
+#Dataframe with pre-cleanup read counts (note: FMK also did cleanup in QIIME2)
+
+pre_covar_removal_reads = data.frame("Sample" = rownames(data), stringsAsFactors = FALSE)
+pre_covar_removal_reads$Total_reads = rowSums(data)
+pre_covar_removal_reads$SampleType = sapply(pre_covar_removal_reads$Sample, function(x) {ifelse(startsWith(x,"BLANK"), "control", "human")})
+
+#create OTU table without covariate contams
+
+dfreq_covar_removal_complete = dfreq_complete[,!(colnames(dfreq_complete) %in% unwanted_taxa)]
+data_covar_removal = data[,!(colnames(data) %in% unwanted_taxa)]
+
+#rempve samples that have 0 reads after contam removal
+dfreq_covar_removal_complete = dfreq_covar_removal_complete[rowSums(dfreq_covar_removal_complete)!=0,] 
+data_covar_removal = data_covar_removal[rowSums(data_covar_removal)!=0,]
+
+#dataframe with remaining total rel abundances across samples?
+
+post_covar_removal_abundances = data.frame("Sample" = rownames(dfreq_covar_removal_complete), stringsAsFactors = FALSE)
+post_covar_removal_abundances$Total_rel_abund = rowSums(dfreq_covar_removal_complete)
+post_covar_removal_abundances$SampleType = sapply(post_covar_removal_abundances$Sample, function(x) {ifelse(startsWith(x,"BLANK"), "control", "human")})
+
+#dataframe with remaining read counts across samples?
+
+post_covar_removal_reads = data.frame("Sample" = rownames(data_covar_removal), stringsAsFactors = FALSE)
+post_covar_removal_reads$Total_reads = rowSums(data_covar_removal)
+post_covar_removal_reads$SampleType = sapply(post_covar_removal_reads$Sample, function(x) {ifelse(startsWith(x,"BLANK"), "control", "human")})
+
+
+```
+
+## Sample filtering
+
+Sample quality filtering acccording to quality cutoffs set by user 
+
+```{r}
+
+read_cutoff = 500
+rel_abund_cutoff = 0.25
+
+samples_less_than_read_cutoff = post_covar_removal_reads[post_covar_removal_reads$Total_reads < read_cutoff, "Sample"]
+samples_less_than_rel_abund_cutoff = post_covar_removal_abundances[post_covar_removal_abundances$Total_rel_abund <rel_abund_cutoff, "Sample"]
+
+samples_under_cutoffs = unique(c(samples_less_than_read_cutoff, samples_less_than_rel_abund_cutoff))
+  
+#Make a normalised otu table of all samples (samples + controls) with covariate contams removed before sample filtering
+
+dfreq_covar_removal_complete.norm =  data.frame(t(apply(dfreq_covar_removal_complete, 1, function(x) x/sum(x))))
+dfreq_covar_removal_complete.norm  = dfreq_covar_removal_complete.norm [,colSums(dfreq_covar_removal_complete.norm)!=0] #remove empty taxa
+
+
+#Make otu tables with samples under the cutoffs removed -- do not include blanks in filtering. 
+
+dfreq_cutoff_filtering = dfreq_covar_removal_complete[!startsWith(rownames(dfreq_covar_removal_complete), "BLANK"),]
+dfreq_cutoff_filtering = dfreq_cutoff_filtering[rownames(dfreq_cutoff_filtering) %!in% samples_under_cutoffs,] 
+
+dfreq_cutoff_filtering.norm = data.frame(t(apply(dfreq_cutoff_filtering, 1, function(x) x/sum(x))))
+
+dfreq_cutoff_filtering.norm = dfreq_cutoff_filtering.norm[,colSums(dfreq_cutoff_filtering.norm)!=0]
+
+#add blanks without contaminants back
+dfreq_cutoff_filtering_complete = rbind(dfreq_cutoff_filtering, dfreq_covar_removal_complete[startsWith(rownames(dfreq_covar_removal_complete), "BLANK"),]) 
+
+#renormalise
+
+dfreq_cutoff_filtering_complete.norm = data.frame(t(apply(dfreq_cutoff_filtering_complete, 1, function(x) x/sum(x)))) #".norm" will always refer to a renormalised table
+
+dfreq_cutoff_filtering_complete.norm = dfreq_cutoff_filtering_complete.norm[,!colSums(dfreq_cutoff_filtering_complete.norm )==0] #remove taxa that are now 0 in every sample
+
+#Repeat for raw reads - no need to worry about blanks or all that stuff
+
+data_cutoff_filtering = data_covar_removal[rownames(data_covar_removal) %!in% samples_under_cutoffs,]
+data_cutoff_filtering = data_cutoff_filtering[,colSums(data_cutoff_filtering)!=0]
+
+
+
+```
+
+
+
+## Final contaminant filtering
+
+Create a new otu table and renormalise
+
+```{r}
+
+badtax = c() #empty vector, vestige of code that had existed. 
+
+# Remove "bad" taxa from our otu tables?
+
+dfreq_pval_filtering = dfreq_cutoff_filtering.norm[,colnames(dfreq_cutoff_filtering.norm) %!in% as.character(badtax)]
+data_pval_filtering = data_cutoff_filtering[,colnames(data_cutoff_filtering) %!in% as.character(badtax)]
+#remove empty rows and columns, normalise 
+
+dfreq_pval_filtering = dfreq_pval_filtering[rowSums(dfreq_pval_filtering) !=0,colSums(dfreq_pval_filtering)!=0]
+dfreq_pval_filtering.norm = data.frame(t(apply(dfreq_pval_filtering, 1, function(x) x/sum(x)))) #".norm" will always refer to a renormalised table
+data_pval_filtering = data_pval_filtering[rowSums(data_pval_filtering) !=0,colSums(data_pval_filtering)!=0]
+
+#OTU table that includes negative controls (blanks)
+dfreq_pval_filtering_complete = dfreq_cutoff_filtering_complete.norm[,colnames(dfreq_cutoff_filtering_complete.norm) %!in% as.character(badtax)]
+
+#remove empty rows and columns, normalise 
+dfreq_pval_filtering_complete = dfreq_pval_filtering_complete[rowSums(dfreq_pval_filtering_complete) !=0,colSums(dfreq_pval_filtering_complete)!=0]
+dfreq_pval_filtering_complete.norm = data.frame(t(apply(dfreq_pval_filtering_complete, 1, function(x) x/sum(x)))) 
+```
+
+
+## Preparing samples for merge
+
+Bray-curtis distances -- how similar are our paired samples to one another? Remember that these are pairs of technical replicates of samples, and should be nearly-identical to one another. As we can see from this analysis, they are not always very similar to one another. 
+
+
+```{r}
+
+
+# Figuring out distances between paired samples
+
+filtered_otu_table = dfreq_pval_filtering_complete.norm 
+
+#Calculate bray-curtis dissimilarity between all pairs of samples
+
+distmat_bray = vegdist(as.matrix(filtered_otu_table),method="bray", binary=FALSE)
+distmat_bray = as.matrix(distmat_bray)
+
+# Pull out comparisons of paired samples
+
+splIDs = substr(rownames(filtered_otu_table),1,nchar(rownames(filtered_otu_table))-4) #get sample IDs
+splIDs = unique(splIDs[ duplicated(splIDs) ]) # get list of sample IDs that are duplicated, ie. survived filtering in poolA and B!
+
+spls_A = paste(splIDs,'--pA',sep="")
+spls_B = paste(splIDs,'--pB',sep="")
+spl_pairs <- c(rbind(paste(splIDs,'--pA',sep=""), paste(splIDs,'--pB',sep="")))
+
+#Make a df of paired sample composition with OTUs as rows for faster plotting 
+paired_spls = filtered_otu_table[spl_pairs,]
+paired_spls = melt(as.matrix(paired_spls))
+colnames(paired_spls) = c("ID", "Taxonomy", "Freq")
+paired_spls$Spl = (sapply(as.character(paired_spls$ID), function(x) {substr(x, 1, nchar(x)-4)}))
+paired_spls$Pool = sapply(as.character(paired_spls$ID), function(x) {substr(x, nchar(x)-1, nchar(x))})
+
+
+#Compare poolA samples to poolB samples
+distances = data.frame()
+for (i in 1:length(splIDs)) {
+  bray = distmat_bray[spls_A[i], spls_B[i]]
+  pop = data.frame(Spl = splIDs[i], Bray = as.numeric(bray))
+  distances = rbind(distances, pop)
+}
+
+distances$SampleType = sapply(as.character(distances$Spl), function(x) {ifelse(startsWith(x, "BLANK"), "control", "human")})
+#Bin Bray values so that we can do a histogram on them
+
+distances$Rounded_Bray = round(distances$Bray/0.005)*0.005
+distance_counts = dplyr::count(distances, Rounded_Bray) #matrixstats masks count from dplyr
+
+
+#how many samples are above our cutoff, exactly? How much data loss is there going to be
+
+samples_above_BC_cutoff = distances[distances$Bray > 0.75,]$Spl #43 sample-pairs, 86 samples #stays the same after removing enrichment analysis
+
+(length(samples_above_BC_cutoff)/ length(distances$Spl)) * 100 #17.13 % of samples 
+
+```
+
+## Sample Merge
+
+Merge pooled samples < 0.75 BC distance for a final, clean, OTU table.  
+
+```{r}
+
+#Which sample pairs are greater than 0.75?
+
+samples_above_BC_cutoff = distances[distances$Bray > 0.75,]$Spl
+
+sample_names_above_BC_cutoff = c(paste(samples_above_BC_cutoff, "--pA", sep = ""), paste(samples_above_BC_cutoff, "--pB", sep = ""))
+
+# remove, then merge
+
+dfreq_sample_merge = dfreq_pval_filtering.norm[rownames(dfreq_pval_filtering.norm) %!in% sample_names_above_BC_cutoff,] #575 samples including controls
+
+dfreq_sample_merge_complete = dfreq_pval_filtering_complete.norm[rownames(dfreq_pval_filtering_complete.norm) %!in% sample_names_above_BC_cutoff,] #575 samples including controls
+
+# remove, then merge
+
+# dfreq_sample_merge_complete = dfreq_pval_filtering_complete.norm[rownames(dfreq_pval_filtering_complete.norm) %!in% sample_names_above_BC_cutoff,] #559 samples including controls
+
+# remove then merge
+
+data_sample_merge = data_pval_filtering[rownames(data_pval_filtering) %!in% sample_names_above_BC_cutoff,]
+
+#Spl names of mergeable samples
+
+spls_tomerge = distances[distances$Bray < 0.75,]$Spl
+spls_tomerge_names = c(paste(spls_tomerge, "--pA", sep = ""), paste(spls_tomerge, "--pB", sep = ""))
+
+pooled_samples_OTUs= data.frame()
+pooled_samples_reads = data.frame()
+
+# pool across columns in df for a sample that has pairs
+for (i in spls_tomerge){
+  # i =  "BLANK1"
+  samples = c(paste(i, "--pA", sep = ""), paste(i, "--pB", sep = ""))
+  temp = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% samples,]
+  means_otus = apply(temp, 2, FUN=mean)
+  temp = rbind(temp, means_otus)
+  rownames(temp)[3] = i
+  pooled_samples_OTUs = rbind(pooled_samples_OTUs, temp[3,])
+  # repeat for reads
+  if ( samples[1] %in% rownames(data_sample_merge)){
+  samples = c(paste(i, "--pA", sep = ""), paste(i, "--pB", sep = ""))
+  temp2 = data_sample_merge[rownames(data_sample_merge) %in% samples,]
+  means_otus2 = apply(temp2, 2, FUN=mean)
+  temp2 = rbind(temp2, means_otus2)
+  rownames(temp2)[3] = i
+  pooled_samples_reads = rbind(pooled_samples_reads, temp2[3,])
+  }
+}
+
+
+#grab unpaired samples 
+
+dfreq_sample_merge_complete = dfreq_sample_merge_complete[!rownames(dfreq_sample_merge_complete) %in% spls_tomerge_names,]
+unpaired_samples = rownames(dfreq_sample_merge_complete)
+rownames(dfreq_sample_merge_complete) = sapply(rownames(dfreq_sample_merge_complete), function(x) {substr(x, 1, nchar(x)-4)})
+
+data_sample_merge = data_sample_merge[!rownames(data_sample_merge) %in% spls_tomerge_names,]
+unpaired_samples = rownames(data_sample_merge)
+rownames(data_sample_merge) = sapply(rownames(data_sample_merge), function(x) {substr(x, 1, nchar(x)-4)})
+
+#Add the merged samples
+
+dfreq_sample_merge_complete = rbind(dfreq_sample_merge_complete, pooled_samples_OTUs) #should be 353 
+
+data_sample_merge = rbind(data_sample_merge, pooled_samples_reads)
+
+#Do we have empty columns (taxa that are now 0)? Remove them. (or keep them)
+
+# colnames(dfreq_sample_merge_complete)[colSums(dfreq_sample_merge_complete) ==0] 
+
+dfreq_sample_merge_complete = dfreq_sample_merge_complete[,colSums(dfreq_sample_merge_complete) !=0] #2271
+
+data_sample_merge = data_sample_merge[,colSums(data_sample_merge)!=0]
+
+# Now fix our metadata file
+
+samples_in_filtered_table = c(unpaired_samples, paste(spls_tomerge, "--pA", sep = ""))
+
+meta_sample_merge_complete = meta_complete[rownames(meta_complete) %in% samples_in_filtered_table,]
+rownames(meta_sample_merge_complete) = sapply(rownames(meta_sample_merge_complete), function(x) {substr(x, 1, nchar(x)-4)})
+
+
+```
+
+## OTU tables for figures 
+
+Any OTU tables with specific merge schemes that are used in more than 1 figure. For figures with a unique merge scheme, those OTU tables will be generated right before the figures in the "Figure_Generation" Rmd document. 
+
+### Merge biological replicates so we don't have to deal with annoying redundancy
+
+```{r}
+
+subjects= unique(meta_sample_merge_complete$Subject)
+subjects = as.character(subjects[!is.na(subjects)])
+
+human_controls = subjects[endsWith( subjects,"-control")]
+human_subjects = subjects[subjects %!in% human_controls]
+
+humans_only_merge_replicates = data.frame()
+humans_only_merge_replicates_reads = data.frame()
+meta_humans_only_merge_replicates = data.frame()
+
+for (i in human_subjects){
+  # i = 2
+  tps = unique(meta_sample_merge_complete[meta_sample_merge_complete$Subject==i,]$Visit)
+  tps = tps[!is.na(tps)] 
+    for (visit in tps){
+      # visit = 4
+      samples_names = as.character(subset(meta_sample_merge_complete, Subject ==i & Visit==visit)$SampleName)
+    body_sites_t1 = as.character(subset(meta_sample_merge_complete, Subject ==i & Visit==visit)$Body_Site)
+    body_sites_t1 = strsplit(body_sites_t1, "_")
+    body_parts = tolower(sapply(body_sites_t1, function(x) {ifelse(length(x)>1, x[2], x[1])}))
+    body_parts_dups = unique(body_parts[duplicated(body_parts)])
+    
+    if (length(body_parts_dups) > 0){
+      
+      body_parts_dups = replace(body_parts_dups, body_parts_dups == "dermatitis", "area")
+      samples_tomerge = sapply(body_parts_dups, function(x) { as.character(subset(meta_sample_merge_complete, Subject ==i & Visit==visit & endsWith(as.character(Body_Site),x))$SampleName)})
+      
+      for (site in names(samples_tomerge)){
+        # site = "knee"
+        merged_samplename = paste(i, "v", visit, site, sep = "_")
+        sitesamps = samples_tomerge[[site]]
+        tempdf = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% sitesamps,]
+        means_otus = apply(tempdf, 2, FUN=mean)
+        tempdf = rbind(tempdf, means_otus)
+        rownames(tempdf)[nrow(tempdf)] = merged_samplename
+        #add averaged otus to df
+        humans_only_merge_replicates = rbind(humans_only_merge_replicates, tempdf[nrow(tempdf),])
+        #Repeat for reads
+        tempreads = data_sample_merge[rownames(data_sample_merge) %in% sitesamps,]
+        reads_means = apply(tempreads, 2, FUN=mean)
+        tempreads = rbind(tempreads, reads_means)
+        rownames(tempreads)[nrow(tempreads)] = merged_samplename
+        humans_only_merge_replicates_reads = rbind(humans_only_merge_replicates_reads, tempreads[nrow(tempreads),])
+        #create new meta
+        site_meta = subset(meta_sample_merge_complete, Subject ==i & Visit==visit & endsWith(as.character(Body_Site), site))[1,c(1:5, 7:9)]
+        site_meta$SampleName = merged_samplename
+        site_meta$Body_Site = site
+        rownames(site_meta) = merged_samplename
+        meta_humans_only_merge_replicates = rbind(meta_humans_only_merge_replicates, site_meta)
+      }
+    } else {
+      tempdf = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% samples_names,]
+      humans_only_merge_replicates = rbind(humans_only_merge_replicates, tempdf)
+      
+      temp2df = data_sample_merge[rownames(data_sample_merge) %in% samples_names,]
+      humans_only_merge_replicates_reads = rbind(humans_only_merge_replicates_reads, temp2df)
+      
+      temp_meta = meta_sample_merge_complete[rownames(meta_sample_merge_complete) %in% samples_names,]
+      temp_meta = temp_meta[,c(1:5, 7:9, 14, 15)]
+      meta_humans_only_merge_replicates = rbind(meta_humans_only_merge_replicates, temp_meta)}
+    }
+  # }
+}
+
+#Last little bits of cleanup
+
+meta_humans_only_merge_replicates$Body_Site = sapply(meta_humans_only_merge_replicates$Body_Site, function(x) {ifelse(x=="area", "Active_dermatitis_area",x)})
+
+# add in site-specific scorad to metadata file
+site_meta = read.csv(paste(file_dir, "site_specific_scorad.csv", sep = "/"), header=TRUE)
+#add body site ifno
+site_meta$Body_Site = sapply(site_meta$Site, function(x) {ifelse(gsub('[[:digit:]]+', '', x) %in% names(bodysite_label_dict), bodysite_label_dict[gsub('[[:digit:]]+', '', x)], x)}) #this code is *chefs kiss*
+#Add in site-specific scorad data
+meta_humans_only_merge_replicates_site = merge(x=meta_humans_only_merge_replicates, y=site_meta, by = c("Subject", "Visit", "Body_Site"), all.x=TRUE)
+
+rownames(meta_humans_only_merge_replicates_site) = meta_humans_only_merge_replicates_site$SampleName
+
+#Add controls back in 
+
+for (control in human_controls){
+  # control = "10-control"
+  samples_names = as.character(subset(meta_sample_merge_complete, Subject ==control)$SampleName)
+  #add otus to otu table
+  tempdf = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% samples_names,]
+  humans_only_merge_replicates = rbind(humans_only_merge_replicates, tempdf)
+  
+  temp2df = data_sample_merge[rownames(data_sample_merge) %in% samples_names,]
+  humans_only_merge_replicates_reads = rbind(humans_only_merge_replicates_reads, temp2df)
+  #add metadata to meta table
+  temp_meta = meta_sample_merge_complete[rownames(meta_sample_merge_complete) %in% samples_names,]
+  temp_meta = temp_meta[,c(1:5, 7:9, 14, 15)]
+  temp_meta$Site  = "control"
+  temp_meta$Active_Dermatitis = NA
+  meta_humans_only_merge_replicates_site = rbind(meta_humans_only_merge_replicates_site, temp_meta) }
+
+
+write.csv(humans_only_merge_replicates, paste(file_dir, "biological_replicates_merged.csv", sep = "/"))
+write.csv(humans_only_merge_replicates_reads, paste(file_dir, "biological_replicates_merged_reads.csv", sep = "/"))
+write.csv(meta_humans_only_merge_replicates_site, paste(file_dir, "meta_biological_replicates_merged.csv", sep = "/") )
+
+
+
+
+```
+
+
+
+## Merge all sites per visit per subject
+
+Create a dataset where all sites, excluding forearms, are merged per visit per subject 
+
+
+```{r}
+
+#Required dataframes:
+# dfreq_sample_merge_complete
+# meta_sample_merge_complete
+
+#list of subjects excluding blanks since those all have a single timepoint
+
+subjects= unique(meta_sample_merge_complete$Subject)
+subjects = as.character(subjects[!is.na(subjects)])
+
+subjects_merged_without_forearm = data.frame()
+meta_subjects_merged_without_forearm = data.frame()
+
+for (i in subjects){
+   # i =  "1"
+  if (!endsWith(i, "control")){
+  tps = unique(as.character((meta_sample_merge_complete[meta_sample_merge_complete$Subject==i,]$Visit)))
+  tps = tps[!is.na(tps)] 
+  for (visit in tps){
+    # visit = 1
+    mini_meta = subset(meta_sample_merge_complete, Subject ==i & Visit==visit & BodySite != "Forearm" & !endsWith(as.character(BodySite), "forearm"))
+    samples = as.character(mini_meta$SampleName)
+    if (length(samples) >=1){
+    temp = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% samples,]
+    means_otus = apply(temp, 2, FUN=mean)
+    temp = rbind(temp, means_otus)
+    rownames(temp)[nrow(temp)] = paste(i, "v", visit, sep ="_")
+    subjects_merged_without_forearm = rbind(subjects_merged_without_forearm, temp[nrow(temp),])
+    #now build metadata file
+    bleach = as.character(unique(mini_meta$ChlorineBath))
+    scorad = unique(mini_meta$ScoradTotal)
+    age_sub = unique(mini_meta$Age)
+    sex_sub = as.character(unique(mini_meta$Sex))
+    metatemp = data.frame("Subject" = i, "Visit" = visit, "ChlorineBath" = bleach , "ScoradTotal" = scorad, "Age"=age_sub , "Sex"=sex_sub, "SampleName" =paste(i, "v", visit, sep ="_") )
+    meta_subjects_merged_without_forearm = rbind(meta_subjects_merged_without_forearm, metatemp)}
+  }
+  }
+  else{
+    minimeta = subset(meta_sample_merge_complete, Subject ==i)
+     samples = as.character(minimeta$SampleName)
+    temp = dfreq_sample_merge_complete[rownames(dfreq_sample_merge_complete) %in% samples,]
+    means_otus = apply(temp, 2, FUN=mean)
+    temp = rbind(temp, means_otus)
+    rownames(temp)[nrow(temp)] = i
+    subjects_merged_without_forearm = rbind(subjects_merged_without_forearm, temp[nrow(temp),])
+     #now build metadata file
+    metatemp = data.frame("Subject" = i, "Visit" = NA, "ChlorineBath" = NA , "ScoradTotal" = NA, "Age"=NA, "Sex"=NA, "SampleName" = i)
+    meta_subjects_merged_without_forearm = rbind(meta_subjects_merged_without_forearm, metatemp)
+    }
+}
+
+#Clean otu table and renormalise
+
+#Remove empty taxa
+subjects_merged_without_forearm = subjects_merged_without_forearm[, colSums(subjects_merged_without_forearm)!=0]
+
+
+
+write.csv(subjects_merged_without_forearm , paste(file_dir, "sample_per_timepoint_no_forearm.csv", sep = "/"))
+write.csv(meta_subjects_merged_without_forearm, paste(file_dir, "meta_sample_per_timepoint_no_forearm.csv", sep = "/") )
+
+
+
+```
+

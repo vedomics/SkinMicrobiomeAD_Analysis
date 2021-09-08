@@ -1,0 +1,1878 @@
+---
+title: "Figures for The skin microbiome of patients with atopic dermatitis normalizes gradually during treatment (Frontiers 2021)"
+author: "VK"
+date: "11/3/2020"
+output: html_document
+---
+
+## Initialise
+
+Import packages and set defaults
+
+```{r, warning=FALSE, message=FALSE}
+
+Sys.setenv(TZ="America/New_York")
+
+library("plyr")
+library("reshape2")
+library("gridExtra")
+library("ggplot2")
+library("cowplot")
+library("utils")
+library("scales")
+library("ggsci")
+library("dplyr")
+library("ggsignif")
+library("RColorBrewer")
+library("phyloseq")
+library("ggpmisc")
+library("vegan")
+library(tibble) 
+
+
+'%!in%' = function(x,y)!('%in%'(x,y))
+theme_set(theme_bw(base_size = 15))
+
+source("./16StaphAD_functions.R")
+
+#Create and initialise output folders
+dir.create("./images")
+image_outdir = "./images/"
+dir.create("./images/supplement_tables")
+table_dir = paste(image_outdir, "supplement_tables", sep = "/")
+file_dir = "./data_files"
+
+```
+
+
+### Import all objects we'll need from the pre-processing script
+
+```{r}
+
+#Ultra-Raw metadata file for SCORADs (no sample loss)
+
+meta = read.csv(paste(file_dir, "meta_clean_noblanks.csv", sep = "/"), header = TRUE, row.names = 1)
+
+
+# Info on which sites are lesional, extra info from MT
+
+site_meta = read.csv(paste(file_dir, "site_specific_scorad.csv", sep = "/"), header=TRUE)
+bodysite_label_dict = list("CD" = "Right_elbow", "RD" = "Right_knee", "AD"="Right_forearm", "CI" = "Left_elbow", "RI" = "Left_knee", "AI" = "Left_forearm", "C" = "elbow", "R" = "knee", "A" = "forearm", "N" = "nares", "De" = "Active_dermatitis_area", "D" = "Active_dermatitis_area", "DE" = "Active_dermatitis_area" )
+site_meta$Body_Site = sapply(site_meta$Site, function(x) {ifelse(gsub('[[:digit:]]+', '', x) %in% names(bodysite_label_dict), bodysite_label_dict[gsub('[[:digit:]]+', '', x)], x)}) #this code is *chefs kiss*
+
+#Biological replicates merged, has individual sites but no duplicates of the same site per pt per tp. has info on which sites are lesional, from above. 
+
+humans_only_merge_replicates = read.csv(paste(file_dir, "biological_replicates_merged.csv", sep = "/"), header = TRUE, row.names =1)
+humans_only_merge_replicates_reads = read.csv(paste(file_dir, "biological_replicates_merged_reads.csv", sep = "/"), header = TRUE, row.names =1)
+meta_humans_only_merge_replicates_sites = read.csv(paste(file_dir, "meta_biological_replicates_merged.csv", sep = "/"), header = TRUE, row.names =1)
+
+  # Remove visit 5 -- does not fit into sampling timeline
+meta_humans_only_merge_replicates_sites = subset(meta_humans_only_merge_replicates_sites, Visit !=5)
+humans_only_merge_replicates = humans_only_merge_replicates[rownames(humans_only_merge_replicates) %in% rownames(meta_humans_only_merge_replicates_sites),]
+humans_only_merge_replicates_reads = humans_only_merge_replicates_reads[rownames(humans_only_merge_replicates_reads) %in% rownames(meta_humans_only_merge_replicates_sites),]
+
+
+# All sites merged without forearm: agnostic to site-specific lesional info. This is bc it is too hard to match every lesional site on a patient across time, too much data loss. This will be the most important df we create. 
+
+subjects_merged_without_forearm = read.csv(paste(file_dir, "sample_per_timepoint_no_forearm.csv", sep = "/"), header = TRUE, row.names = 1)
+meta_subjects_merged_without_forearm= read.csv(paste(file_dir, "meta_sample_per_timepoint_no_forearm.csv", sep = "/"), header = TRUE, row.names = 1 )
+
+  #remove visit 5
+meta_subjects_merged_without_forearm_4 = subset(meta_subjects_merged_without_forearm, Visit !=5)
+rownames(meta_subjects_merged_without_forearm_4) = meta_subjects_merged_without_forearm_4$SampleName
+
+subjects_merged_without_forearm_4 = subset(subjects_merged_without_forearm, rownames(subjects_merged_without_forearm) %in% rownames(meta_subjects_merged_without_forearm_4))
+
+# Remove timepoints which are both incompatible with the 2mo, 3mo timelines (see Methods)
+
+bad_tps = c("7_v_3", "7_v_4", "9_v_4", "12_v_3", "12_v_4", "21_v_4")
+
+meta_noforearm_nobadtps = meta_subjects_merged_without_forearm_4[rownames(meta_subjects_merged_without_forearm_4) %!in% bad_tps,]
+
+noforearm_nobadtps = subjects_merged_without_forearm_4[rownames(subjects_merged_without_forearm_4) %!in% bad_tps,]
+
+
+```
+
+
+# Figure 2
+### The microbiomes of children with AD are dominated by Staphylococcus aureus.
+
+### Figure 2a: Setup
+
+Bar chart w healthy controls vs all sites on AD patients
+Bar chart w lesional vs non-lesional sites on AD patients
+
+Create merged OTU table:
+
+```{r}
+
+#Required dataframes:
+# humans_only_merge_replicates
+# meta_humans_only_merge_replicates_sites
+
+# Baseline samples:
+visit_1_meta = subset(meta_humans_only_merge_replicates_sites, Visit == "1") #Subset to baseline samples only
+
+#subset sample names of healthy controls
+healthy_controls = rownames(subset(visit_1_meta, endsWith(as.character(visit_1_meta$Subject), "control"))) #controls
+
+#Subset patients into their own df
+visit_1_patients = visit_1_meta[rownames(visit_1_meta) %!in% healthy_controls,] # patients
+
+#grab lesional sites
+visit_1_patient_lesional = rownames(subset(visit_1_patients, Active_Dermatitis ==1))
+
+#grab healthy sites 
+visit_1_patient_nonlesional = rownames(subset(visit_1_patients, Active_Dermatitis ==0))
+
+
+# 1--- compare healthy controls to all sites on AD patiens 
+baseline_samples = list("healthy" = healthy_controls, "AD_patients" = rownames(visit_1_patients))
+
+# Merge across all patients
+
+merged_at_baseline = data.frame()
+
+for (i in names(baseline_samples)){
+  condition = i
+  samples = as.character(unlist(baseline_samples[i]))
+  temp_otus = humans_only_merge_replicates[rownames(humans_only_merge_replicates) %in% samples,]
+  means_otus = apply(temp_otus, 2, FUN=mean)
+  temp_otus = rbind(temp_otus, means_otus)
+  rownames(temp_otus)[nrow(temp_otus)] = condition
+  merged_at_baseline= rbind(merged_at_baseline, temp_otus[nrow(temp_otus),])
+}
+
+#Remove empty columns
+
+merged_at_baseline = merged_at_baseline[,colSums(merged_at_baseline)!=0]
+
+#Create a dummy metadata file 
+baseline_meta = data.frame("Sample_Name" = rownames(merged_at_baseline), row.names = rownames(merged_at_baseline))
+baseline_meta$StaphAur = sapply(baseline_meta$Sample_Name, function(x) merged_at_baseline[rownames(merged_at_baseline)==x, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+
+#Coerce to phyloseq, which organises taxonomic info and sample info in a very nice and intuitive way
+
+baseline_physeq = coerce_to_phyloseq(merged_at_baseline, baseline_meta)
+
+
+#2 ---- compare lesional to non-lesional sites on AD patients 
+
+baseline_samples_AD = list("non_lesional" = visit_1_patient_nonlesional, "lesional" = visit_1_patient_lesional)
+
+# Merge across all patients
+
+merged_at_baseline_AD = data.frame()
+
+
+for (i in names(baseline_samples_AD)){
+  
+  condition = i
+  samples = as.character(unlist(baseline_samples_AD[i]))
+  temp_otus = humans_only_merge_replicates[rownames(humans_only_merge_replicates) %in% samples,]
+  means_otus = apply(temp_otus, 2, FUN=mean)
+  temp_otus = rbind(temp_otus, means_otus)
+  rownames(temp_otus)[nrow(temp_otus)] = condition
+  merged_at_baseline_AD= rbind(merged_at_baseline_AD, temp_otus[nrow(temp_otus),])
+}
+
+#Remove empty columns
+
+merged_at_baseline_AD = merged_at_baseline_AD[,colSums(merged_at_baseline_AD)!=0]
+
+#Create a dummy metadata file 
+baseline_meta_AD = data.frame("Sample_Name" = rownames(merged_at_baseline_AD), row.names = rownames(merged_at_baseline_AD))
+baseline_meta_AD$StaphAur = sapply(baseline_meta_AD$Sample_Name, function(x) merged_at_baseline_AD[rownames(merged_at_baseline_AD)==x, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+
+#Coerce to phyloseq, which organises taxonomic info and sample info in a very nice and intuitive way
+
+baseline_physeq_AD = coerce_to_phyloseq(merged_at_baseline_AD, baseline_meta_AD)
+
+```
+
+#### Supplement Table 2
+
+Table 2: comparisons between groups at baseline and comparisons between lesional and non-lesional sites on AD patients 
+
+```{r}
+
+# 1 -- compare healthy controls and AD patients 
+
+healthy_vs_patients_baseline = subset(humans_only_merge_replicates, rownames(humans_only_merge_replicates) %in% c(healthy_controls, rownames(visit_1_patients)))
+
+# Search terms -- what taxa are we interested in comparing? 
+
+search_terms= c("Corynebacterium", "Micrococcus", "Cutibacterium", "Paracoccus", "Acinetobacter", "Bacteroidetes", ".capitis", "s.epidermidis",".aureus")
+
+taxa_of_interest_stats = list()
+
+for (i in search_terms){
+  # i = "Micrococcus"
+  specs_loc = grep(i, colnames(healthy_vs_patients_baseline))
+  # specs = colnames(healthy_vs_patients_baseline)[specs_loc]
+  specs_df = data.frame(healthy_vs_patients_baseline[,specs_loc])
+  specs_df$Total_bug = rowSums(specs_df) 
+  colnames(specs_df)[ncol(specs_df)] = i
+  # taxa_of_interest_stats = cbind(taxa_of_interest_stats, data.frame(specs_df[,ncol(specs_df), drop=FALSE]))
+  taxa_of_interest_stats[[i]] = data.frame(specs_df[,ncol(specs_df), drop=FALSE])
+  
+}
+
+stats_df = as.data.frame(taxa_of_interest_stats)
+
+stats_df <- stats_df %>%
+  rownames_to_column() %>%
+  mutate(Groups = case_when(rownames(stats_df) %in% rownames(visit_1_patients) ~"AD_patient",
+                           rownames(stats_df) %in% healthy_controls ~ "Healthy")) %>%
+  column_to_rownames()
+
+
+stats_info = data.frame()
+
+for (i in 1:(length(colnames(stats_df))-1)){
+  # i = 1
+  group_col = which(colnames(stats_df) =="Groups") #changes depending on search length, so nice to have
+  taxa = colnames(stats_df)[i]
+  avg_health = mean(subset(stats_df[,c(i,group_col)], Groups == "Healthy")[,1]) * 100
+  avg_AD = mean(subset(stats_df[,c(i,group_col)], Groups == "AD_patient")[,1]) * 100
+ 
+  #tests
+  p_health_les = wilcox.test(subset(stats_df[,c(i,group_col)], Groups == "Healthy")[,1], subset(stats_df[,c(i,group_col)], Groups == "AD_patient")[,1])
+  
+  stats_info = rbind(stats_info, data.frame("Taxa" = taxa, "Health_perc" = avg_health, "AD_perc" = avg_AD, "two_tailed_p" = as.numeric(p_health_les$p.value)))
+  
+}
+
+#clean up the names for legibilitiy
+stats_info <- stats_info %>%
+  mutate(Taxa = as.character(Taxa)) %>%
+  mutate(Taxa = replace(Taxa, Taxa == ".aureus", "Staphyloccocus aureus")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "s.epidermidis", "Staphyloccocus epidermidis")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == ".capitis", "Staphyloccocus capitis"))
+
+
+                    
+write.csv(stats_info, paste(table_dir, "supplement_table_2pt1_baseline_comparisons.csv", sep = "/") )
+
+# 2--- compare lesional and non-lesional
+# We can use stats_df from before, since it already contains the necessary info
+
+
+les_nonles <- stats_df %>%
+  rownames_to_column() %>%
+  mutate(Groups = case_when(rownames(stats_df) %in% visit_1_patient_lesional ~"Lesional",
+                           rownames(stats_df) %in% visit_1_patient_nonlesional ~"Non_Lesional",
+                           rownames(stats_df) %in% healthy_controls ~ "Healthy")) %>%
+  column_to_rownames()
+
+
+AD_stats_info = data.frame()
+
+for (i in 1:(length(colnames(les_nonles))-1)){
+  # i = 1
+  group_col = which(colnames(les_nonles) =="Groups") #changes depending on search length, so nice to have
+  taxa = colnames(les_nonles)[i]
+  avg_les = mean(subset(les_nonles[,c(i,group_col)], Groups == "Lesional")[,1]) * 100
+  avg_nonles = mean(subset(les_nonles[,c(i,group_col)], Groups == "Non_Lesional")[,1]) * 100
+ 
+  #tests
+  p_health_les = wilcox.test(subset(les_nonles[,c(i,group_col)], Groups == "Lesional")[,1], subset(les_nonles[,c(i,group_col)], Groups == "Non_Lesional")[,1])
+  
+  AD_stats_info = rbind(AD_stats_info, data.frame("Taxa" = taxa, "Lesional_perc" = avg_les, "Non-lesional_perc" = avg_nonles, "two_tailed_p" = as.numeric(p_health_les$p.value)))
+  
+}
+
+#clean up the names for legibilitiy
+AD_stats_info <- AD_stats_info %>%
+  mutate(Taxa = as.character(Taxa)) %>%
+  mutate(Taxa = replace(Taxa, Taxa == ".aureus", "Staphyloccocus aureus")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "s.epidermidis", "Staphyloccocus epidermidis")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == ".capitis", "Staphyloccocus capitis"))
+
+
+write.csv(AD_stats_info, paste(table_dir, "supplement_table_2pt2_baseline_comparisons_within_AD.csv", sep = "/") )
+
+
+
+
+```
+
+### Fig 2a pt 1
+
+Fig 2a pt 1: bar chart comparing taxa in healthy controls and AD patients
+
+note: taxa are represented in this graph type by abundance -- taxa that are present at a relative abundance greater than or equal to <use_defined_cutoff> are given their own color, otherwise they are collapsed to the next taxonomic level up. 
+
+note 2: the top taxa to highlight have been pre-prescribed by previous analyses to be a set list, so that we can be consistent across figures in colors and names. if an OTU table contains these taxa of interest at LESS than the prescribed cutoff, they are not displayed. 
+
+
+```{r, warning = FALSE}
+
+# Create a "plot_counts" dataframe, that includes specific species and genera above 5%, otherwise only includes phylum-level information 
+
+levels = c("Species", "Genus", "Phylum")
+
+cutoff = 0.05
+
+plot_counts = generate_collapsed_counts_df(baseline_physeq, cutoff, taxonomic_levels_ofinterest = levels)
+
+baseline_health_AD = plot_collapsed_counts(plot_counts, sample_order = c("healthy", "AD_patients"))
+
+ggsave(paste(image_outdir, "figure2a_baseline_Healthy_patients_comparison.pdf", sep = "/"), baseline_health_AD, device = "pdf", dpi = 300, useDingbats = FALSE, height = 8, width = 6)
+
+ggsave(paste(image_outdir, "figure2a_baseline_Healthy_patients_comparison.png", sep = "/"), baseline_health_AD, device = "png", dpi = 300, height = 12, width = 8)
+
+print(baseline_health_AD)
+
+#plot saves without "striations", but renders differently in different programs, enough to make me die. thanks
+
+```
+
+###Fig 2a pt 2:
+bar chart comparing taxa in lesional vs non lesional sites in AD patients 
+
+```{r}
+
+levels = c("Species", "Genus", "Phylum")
+
+cutoff = 0.05
+
+baseline_AD = generate_collapsed_counts_df(baseline_physeq_AD, cutoff, taxonomic_levels_ofinterest = levels)
+
+baseline_within_AD = plot_collapsed_counts(baseline_AD, sample_order = c("non_lesional", "lesional" ))
+
+
+ggsave(paste(image_outdir, "figure2a_baseline_AD_patients_comparison.pdf", sep = "/"), baseline_within_AD, device = "pdf", dpi = 300, useDingbats = FALSE, height = 8, width = 6)
+
+ggsave(paste(image_outdir, "figure2a_baseline_AD_patients_comparison.png", sep = "/"), baseline_within_AD, device = "png", dpi = 300, height = 12, width = 8)
+
+print(baseline_within_AD)
+
+
+```
+
+
+
+### Fig 2d: SCORAD and S aureus relative abundance graph 
+
+Plot the composition of samples, colored by Staph species, ordered from highest scorad to lowest scorad (as above, with the AD sites)
+
+```{r}
+
+#Required dataframes:
+
+#noforearm_nobadtps
+#meta_noforearm_nobadtps
+
+#Order by scorads 
+
+meta_plotting = meta_noforearm_nobadtps[!endsWith(as.character(meta_noforearm_nobadtps$Subject), "control"),]
+
+scorad_order = as.character(meta_plotting[order(-meta_plotting$ScoradTotal),]$SampleName) 
+  
+scorads= ggplot(meta_plotting, aes(x=factor(SampleName, levels = scorad_order), y=ScoradTotal))+
+    geom_line(aes(group=1))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.ticks.x = element_blank(), axis.text.x =element_blank(), axis.title.y = element_text(size=12), panel.border = element_blank(), axis.text.y = element_text(size = 20, hjust = 1.5), axis.ticks.length.y = unit(0.25, "cm"))+
+  scale_y_continuous(breaks = seq(0,80,40))+
+  geom_hline(aes(yintercept = 25), linetype= "dashed", col = "grey40")+
+    labs(x = "Sample per timpeoint")
+
+#Reshape our otu table
+avgd_subs_plotting = melt(t(noforearm_nobadtps))
+colnames(avgd_subs_plotting) = c("Taxonomy", "ID", "Freq")
+
+#Add in useful info
+
+avgd_subs_plotting$Subject = with(meta_noforearm_nobadtps, as.character(Subject)[match(avgd_subs_plotting$ID, SampleName)])
+avgd_subs_plotting$Visit = with(meta_noforearm_nobadtps, Visit[match(avgd_subs_plotting$ID, SampleName)])
+
+#remove controls
+
+avgd_subs_plotting = avgd_subs_plotting[!endsWith(avgd_subs_plotting$Subject, "control"),]
+
+#plot only values that are not 0
+avgd_subs_plotting = avgd_subs_plotting[avgd_subs_plotting$Freq>0,] 
+  
+#Find all the staph species
+
+avgd_subs_plotting$Taxonomy = as.character(avgd_subs_plotting$Taxonomy)
+staph_pos = grep("Staphylococcus", unique(avgd_subs_plotting$Taxonomy))
+staph_specs = as.character(unique(avgd_subs_plotting$Taxonomy)[staph_pos])
+# top7staph = c("Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus",as.character(staph_specs[c(2:7)]))
+
+top7staph = c("Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus" , "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis", "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis" )
+
+other_staph = staph_specs[staph_specs %!in% top7staph]
+
+# "#377EB8" this should be our regular blue color "#5a95c4"
+
+# staph_color_palette = rev(c("firebrick1", "#679dc8", "#377EB8", rep("darkblue", length(staph_specs) -3)))
+staph_color_palette = c(rep("darkblue", length(staph_specs) -3),"#377EB8", "#679dc8","firebrick1")
+
+# ngreys = rep(NA, length(unique(avgd_subs_plotting$Taxonomy))-length(staph_specs))
+ngreys = rep("grey90", length(unique(avgd_subs_plotting$Taxonomy))-length(staph_specs))
+# staph_color_palette = c(staph_color_palette, ngreys)
+
+staph_color_palette = c(ngreys, staph_color_palette)
+
+#Some machinsations to get everything in the right order, so that breaks and values line up. 
+
+alltax_without_staph = unique(as.character(avgd_subs_plotting$Taxonomy))
+alltax_without_staph = alltax_without_staph[alltax_without_staph %!in% staph_specs]
+# avgd_subs_plotting$Taxonomy = factor(avgd_subs_plotting$Taxonomy, levels = c(staph_specs, other_staph, alltax_without_staph))
+avgd_subs_plotting$Taxonomy = factor(avgd_subs_plotting$Taxonomy, levels = c(alltax_without_staph, other_staph, rev(top7staph)))
+
+# staph_color_palette = rev(staph_color_palette)
+
+#to toggle between ordering by scorad or staph, change the factor levels of x axis to scorad_order to all_ids_in_staph_order
+
+composition_plot = ggplot(avgd_subs_plotting, aes(x=factor(ID, levels = scorad_order), y= Freq))+
+    geom_bar(aes(fill = Taxonomy), stat="identity", width=1, color = NA)+
+    theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.ticks.x = element_blank(), axis.text.x =element_blank(), axis.title.y = element_text(size = 12), axis.title.x = element_blank(), panel.border = element_blank(), axis.text.y = element_text(size = 20, hjust = 1.5), axis.ticks.length.y = unit(0.25, "cm"))+
+  scale_fill_manual(values= staph_color_palette, labels = c("S_aureus", "S_capitis", "S_epidermidis", rep("All other Staphylococci",13)), breaks=staph_specs)+
+    scale_y_continuous(breaks=seq(0,1,0.2), expand = c(0, 0))+
+    labs( y = "Relative Abundance")
+  # theme(legend.position = "none")
+  # labs(x = "Subject per timepoint", title = "S. aureus relative abundance in lesional sites", subtitle = "Visits 1- 4")+
+  
+  ## get the legend 
+  tmp <- ggplot_gtable(ggplot_build(composition_plot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) ==  "guide-box")
+  legend <- tmp$grobs[[leg]]
+  
+  
+  summary = plot_grid(scorads, composition_plot +theme(legend.position = "none"), arrangeGrob(legend), align = "v", nrow = 3, rel_heights = c(1/4, 1/2, 1/4), axis = "b")
+  
+    # print(summary)
+  
+    summary_no_legend =  plot_grid( composition_plot +theme(legend.position = "none"), scorads, align = "v", nrow = 2, rel_heights = c(3/4, 1/4), axis = "b")
+    # print(summary_no_legend)
+    
+    legend_only = arrangeGrob(legend)
+    
+  ggsave(paste(image_outdir, "figure2b_staphs_and_scorad.pdf", sep = "/"), summary_no_legend, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 12)
+  
+    ggsave(paste(image_outdir, "figure2b_legend_only.pdf", sep = "/"), legend_only, device = "pdf", dpi = 300, useDingbats = FALSE, height = 10, width = 12)
+  
+    ggsave(paste(image_outdir, "figure2b_staphs_and_scorad_NOLEG.png", sep = "/"), summary_no_legend, device = "png", dpi = 300, height = 5, width = 12)
+    
+    
+  
+  print(summary_no_legend)
+  
+
+```
+
+### Fig 2b,c:  S. aureus correlation with SCORAD, alpha div
+
+How does SCORAD (a per-patient metric) correlate with s. aureus burden?
+
+
+```{r}
+
+#Required dataframes:
+#noforearm_nobadtps
+#meta_noforearm_nobadtps
+
+
+#Grab Shannon Diversity
+ 
+shannon_div = as.data.frame(diversity(noforearm_nobadtps, index = "shannon", MARGIN = 1, base = exp(1)), row.names = rownames(noforearm_nobadtps))
+colnames(shannon_div) = "Shanon_div"
+
+#Grab info on the % of relevant bugs in all samples 
+s_aureus_correlations = data.frame()
+
+for (i in 1:nrow(noforearm_nobadtps)){
+  samplename = rownames(noforearm_nobadtps)[i]
+  staphaur = noforearm_nobadtps[rownames(noforearm_nobadtps)==samplename, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"]
+  staphepi = noforearm_nobadtps[rownames(noforearm_nobadtps)==samplename, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis"]
+  staph_cap = noforearm_nobadtps[rownames(noforearm_nobadtps)==samplename,"Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis"]
+  staph_hom = noforearm_nobadtps[rownames(noforearm_nobadtps)==samplename,"Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.hominis"]
+  s_aureus_correlations = rbind(s_aureus_correlations, data.frame("Rel_Staph_Aureus" = staphaur, "Rel_Staph_epi" = staphepi, "Rel_Staph_Cap" = staph_cap, "Rel_Staph_hom" = staph_hom, row.names = samplename))
+}
+
+shannon_div = cbind(shannon_div, s_aureus_correlations)
+shannon_div$SampleName = rownames(shannon_div)
+
+plot_corrs = merge(shannon_div, meta_noforearm_nobadtps, by = "SampleName")
+
+# S. aureus Vs. SCORAD
+
+spear_test_scorad = cor.test(plot_corrs$Rel_Staph_Aureus, plot_corrs$ScoradTotal, method = "spearman")
+rhoval = as.numeric(spear_test_scorad$estimate)
+
+scorad_staph_scatter = ggplot(plot_corrs, aes(x = Rel_Staph_Aureus, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Rho:", round(rhoval, digits =3)), x = 0.5, y = 5, color = "grey40", size = 8)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=15),  axis.text.y = element_text(size = 15, hjust = -0.5), axis.ticks.length.y = unit(0.25, "cm"), axis.ticks.length.x = unit(0.25, "cm"))+
+  scale_y_continuous(breaks = seq(0,80,20))+
+  labs(y = "SCORAD", x = "Relative abundance of S. aureus")
+
+ggsave(paste(image_outdir, "figure2c_staph_scorad_scatter.pdf", sep = "/"), scorad_staph_scatter, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+ggsave(paste(image_outdir, "figure2c_staph_scorad_scatter.png", sep = "/"), scorad_staph_scatter, device = "png", dpi = 300)
+
+scorad_staph_scatter
+
+#S. aureus vs. Shannon
+
+
+spear_test_shanon = cor.test(plot_corrs$Rel_Staph_Aureus, plot_corrs$Shanon_div, method = "spearman")
+rhoval_shanon = as.numeric(spear_test_shanon$estimate)
+
+shanon_staph_scatter = ggplot(plot_corrs, aes(y=Shanon_div, x = Rel_Staph_Aureus))+
+  geom_point()+
+  annotate("text", label = paste("Rho:", round(rhoval_shanon, digits =3)), x = 0.5, y = 0.15, color = "grey40", size = 8)+
+  labs(x = "Relative abundance of S. aureus", y = "Shannon diversity")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=15),  axis.text.y = element_text(size = 15, hjust = -0.5), axis.ticks.length.y = unit(0.25, "cm"))
+
+
+ggsave(paste(image_outdir, "figure2c_shanon_staph_scatter.pdf", sep = "/"), shanon_staph_scatter, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+
+
+ggsave(paste(image_outdir, "figure2c_shanon_staph_scatter.png", sep = "/"), shanon_staph_scatter, device = "png", dpi = 300)
+shanon_staph_scatter
+
+# How does Scorad correlate with alpha diversity in these lesional samples? (supp figure 3)
+
+shannon_scorad_lesional = cor.test(plot_corrs$Shanon_div, plot_corrs$ScoradTotal, method = "spearman")
+rhoval_ss = as.numeric(shannon_scorad_lesional$estimate)
+
+shannon_scorad_scatter = ggplot(plot_corrs, aes(y=Shanon_div, x =ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Rho:", round(rhoval_ss, digits =3)), x = 0.5, y = 0.15, color = "grey40", size = 8)+
+  labs(y = "Shannon diversity", x = "SCORAD")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=15),  axis.text.y = element_text(size = 15, hjust = -0.5), axis.ticks.length.y = unit(0.25, "cm"))
+  
+  ggsave(paste(image_outdir, "supp_fig3_shanon_scorad_scatter.pdf", sep = "/"), shannon_scorad_scatter, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+
+
+ggsave(paste(image_outdir, "supp_fig3_shanon_scorad_scatter.png", sep = "/"), shannon_scorad_scatter, device = "png", dpi = 300)
+
+```
+
+
+
+### Supplement fig 2: SCORAD vs other staph
+
+Can we see a positive correlation between SCORAD and other staph species? Particularly the ones that are highlighted in figure 2d as well as aggregate staph species (excluding staph aureus)
+
+```{r}
+
+#These have been included for us in meta_of_interest
+staph_species_test =  c( "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis", "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis", "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.hominis")
+
+
+#Staph epi
+  
+  spear_test_epi = cor.test(plot_corrs[,10], plot_corrs[,4], method = "spearman")
+  rhoval_epi = as.numeric(spear_test_epi$estimate)
+  pval_epi = as.numeric(spear_test_epi$p.val)
+  
+epi_spear =   ggplot(plot_corrs, aes(x = Rel_Staph_epi, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_epi, digits =3)), x = 0.3, y = 5, color = "grey40")+
+  # annotate("text", label = paste("pval", round(pval, digits =3)), x = 0.3, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph epi")
+  
+  
+  ggsave(paste(image_outdir, "supplement_s_epi_SCORAD.png", sep = "/"), epi_spear, device = "png", dpi = 300)
+  
+  ggsave(paste(image_outdir, "supplement_s_epi_SCORAD.pdf", sep = "/"), epi_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+  
+#Staph capitis
+  
+  
+spear_test_cap = cor.test(plot_corrs[,10], plot_corrs[,5], method = "spearman")
+  rhoval_cap = as.numeric(spear_test_cap$estimate)
+  pval_cap = as.numeric(spear_test_cap$p.val)
+  
+  cap_spear = ggplot(plot_corrs, aes(x = Rel_Staph_Cap, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_cap, digits =3)), x = 0.5, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =3)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph capitis")
+  
+  ggsave(paste(image_outdir, "supplement_s_cap_SCORAD.png", sep = "/"), cap_spear, device = "png", dpi = 300)
+   ggsave(paste(image_outdir, "supplement_s_cap_SCORAD.pdf", sep = "/"), cap_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+  
+  #Staph homini
+  
+  
+spear_test_hom = cor.test(plot_corrs[,10], plot_corrs[,6], method = "spearman")
+  rhoval_hom = as.numeric(spear_test_hom$estimate)
+  pval_hom = as.numeric(spear_test_hom$p.val)
+  
+  hom_spear = ggplot(plot_corrs, aes(x = Rel_Staph_hom, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_hom, digits =3)), x = 0.1, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =4)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph hominis")
+
+  
+  ggsave(paste(image_outdir, "supplement_s_hom_SCORAD.png", sep = "/"), hom_spear, device = "png", dpi = 300)
+  ggsave(paste(image_outdir, "supplement_s_hom_SCORAD.pdf", sep = "/"), hom_spear, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+
+#all staph OTHER than s. aureus
+
+all_staph_species = colnames(noforearm_nobadtps)[grep("Staphylococcus", colnames(noforearm_nobadtps))]
+#a vector of staph species to be merged
+all_staph_species = all_staph_species[ all_staph_species!= "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"]
+
+# so there's a glitch in the tax table where Corynebacterium.diphtheriae is labelled as a staph species? we're removing it
+
+all_staph_species = all_staph_species[-1] #its the first element, alphabetically
+
+cat_staph = noforearm_nobadtps[,colnames(noforearm_nobadtps) %in% all_staph_species]
+cat_staph$concat_staph = rowSums(cat_staph)
+
+plot_corrs = cbind(plot_corrs, cat_staph$concat_staph)
+colnames(plot_corrs)[13] = "Rel_all_Staph"
+
+spear_test = cor.test(plot_corrs[,13], plot_corrs[,10], method = "spearman")
+  rhoval = as.numeric(spear_test$estimate)
+  pval = as.numeric(spear_test$p.val)
+  
+  allstaph_spear = ggplot(plot_corrs, aes(x = Rel_all_Staph, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval, digits =3)), x = 0.5, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =4)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "All Staph species")
+
+  
+  ggsave(paste(image_outdir, "supplement_staph_specs_total_SCORAD.png", sep = "/"),  allstaph_spear, device = "png", dpi = 300)
+  
+    ggsave(paste(image_outdir, "supplement_staph_specs_total_SCORAD.pdf", sep = "/"),  allstaph_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height =5, width = 7)
+
+
+
+
+```
+
+# Figure 3
+Treatment gradually shifts microbiomes of children with AD towards healthy microbiota
+
+### 3a: PCoA
+
+PCoA on merged dataset colored by visit. Only use subsets of samples where non-lesional samples have been removed if they were non-lesional across all four visits
+
+```{r}
+
+#Coerce to physeq -- just makes life so much easier
+
+
+merged_controls = subset(meta_subjects_merged_without_forearm, is.na(ScoradTotal))
+
+meta_subjects_merged_without_forearm_4_controls = rbind(meta_noforearm_nobadtps, merged_controls)
+rownames(meta_noforearm_nobadtps) = meta_noforearm_nobadtps$SampleName
+rownames(meta_subjects_merged_without_forearm_4_controls) = meta_subjects_merged_without_forearm_4_controls$SampleName
+
+subjects_merged_without_forearm_4_controls =  subset(subjects_merged_without_forearm, rownames(subjects_merged_without_forearm) %in% rownames(meta_subjects_merged_without_forearm_4_controls))
+
+subjects_lesional_merged_physeq = coerce_to_phyloseq(subjects_merged_without_forearm_4_controls, meta_subjects_merged_without_forearm_4_controls)
+
+# Plot PCoAs on Bray-Curtis distances
+
+params = c("ChlorineBath","Visit", "Subject","ScoradTotal")
+
+merged_samps.ord = ordinate(subjects_lesional_merged_physeq, "PCoA", "bray")
+
+
+pcoa_aesthetics = plot_ordination(subjects_lesional_merged_physeq, merged_samps.ord)$data
+
+pcoa_labels = plot_ordination(subjects_lesional_merged_physeq, merged_samps.ord)$labels
+
+pcoa_xlabel = pcoa_labels$x
+pcoa_ylabel = pcoa_labels$y
+
+pcoa_aesthetics$Visit = as.character(pcoa_aesthetics$Visit)
+
+pcoa_aesthetics$inverted_axis1 = pcoa_aesthetics$Axis.1 * (-1)
+
+show_col(brewer.pal(6, "Set1"))
+
+#First, lets make sure all controls have an "NA" visit
+
+pcoa_visit = ggplot(pcoa_aesthetics, aes(x=inverted_axis1, y=Axis.2))+
+  geom_point(aes(color = Visit), alpha = 0.7, size = 4)+
+  scale_color_manual(values = c("1" = "#F5BB00", "2" ="grey", "3" =  "grey", "4" = "#00A39E", "5" = "yellow"), na.value="black", labels = c("1", "2", "3", "4", "Healthy control"))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12), legend.position = "none", aspect.ratio = 1)+
+  labs( x = pcoa_xlabel, y = pcoa_ylabel) 
+
+
+ggsave(paste(image_outdir, "figure3a_pcoa_colored_by_visit.pdf", sep = "/"), pcoa_visit, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+ggsave(paste(image_outdir, "figure3a_pcoa_colored_by_visit.png", sep = "/"), pcoa_visit, device = "png", dpi = 300)
+
+pcoa_visit
+
+```
+
+
+### Figure 3b Longitudinal composition of AD samples
+
+Make a unique OTU table where AD sites are merged across sites and subjects at visits 1- 4
+
+
+```{r}
+
+#Required dataframes:
+# noforearm_nobadtps
+# meta_noforearm_nobadtps
+
+#First we must merge all patients per visit
+
+merged_across_visits = data.frame()
+
+for (visit in c(1:4)){
+  meta_visit = subset(meta_noforearm_nobadtps, Visit == visit)
+  meta_visit_samps = rownames(meta_visit)
+  
+  meta_visit_samps_otus = noforearm_nobadtps[rownames(noforearm_nobadtps) %in% meta_visit_samps,]
+  
+  meta_otus_mean = apply(meta_visit_samps_otus, 2, FUN=mean)
+  meta_visit_samps_otus = rbind(meta_visit_samps_otus, meta_otus_mean)
+  rownames(meta_visit_samps_otus)[nrow(meta_visit_samps_otus)] = paste("visit", visit, sep = "_")
+  
+  merged_across_visits = rbind(merged_across_visits , meta_visit_samps_otus[nrow(meta_visit_samps_otus),])
+}
+
+#Coerce to physeq
+
+meta_merged_across_visits = data.frame("Sample_Name" = rownames(merged_across_visits), row.names = rownames(merged_across_visits))
+                                       
+meta_merged_across_visits$StaphAur = sapply(meta_merged_across_visits$Sample_Name, function(x) merged_across_visits [rownames(merged_across_visits )==x, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+
+visit_merge_physeq = coerce_to_phyloseq(merged_across_visits, meta_merged_across_visits)
+
+```
+
+# Supplemental Table 2
+
+Visit 1 vs visit 3 and visit 4
+
+
+```{r}
+
+
+visit1_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==1))
+visit2_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==2))
+visit3_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==3))
+visit4_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==4))
+
+# Staph species 
+
+staph_loc = grep(c(".capitis|s.epidermidis|.aureus|Staphylococcus.hominis"), colnames(noforearm_nobadtps))
+
+staphs_df = as.data.frame(noforearm_nobadtps[,staph_loc])
+rownames(staphs_df) = rownames(noforearm_nobadtps)
+staphs_df = staphs_df[!(endsWith(rownames(staphs_df), "control")),]
+
+#Get groups
+staphs_df <- staphs_df %>%
+  rownames_to_column() %>%
+  mutate(Groups = case_when(rownames(staphs_df) %in% visit1_samps ~"Visit_1",
+                           rownames(staphs_df) %in% visit2_samps ~"Visit_2",
+                           rownames(staphs_df) %in% visit3_samps~"Visit_3",
+                           rownames(staphs_df) %in% visit4_samps ~"Visit_4")) %>%
+  column_to_rownames()
+
+staph_info = data.frame()
+
+for (i in 1:(length(colnames(staphs_df))-1)){
+  # i = 1
+  taxa = colnames(staphs_df)[i]
+  avg_v1 = mean(subset(staphs_df[,c(i,5)], Groups == "Visit_1")[,1]) * 100
+  avg_v3 = mean(subset(staphs_df[,c(i,5)], Groups == "Visit_3")[,1]) * 100
+  avg_v4 = mean(subset(staphs_df[,c(i,5)], Groups == "Visit_4")[,1]) * 100
+  
+  #tests
+  p_v1_v3 = wilcox.test(subset(staphs_df[,c(i,5)], Groups == "Visit_1")[,1], subset(staphs_df[,c(i,5)], Groups =="Visit_3")[,1])
+  #tests
+  p_v1_v4 = wilcox.test(subset(staphs_df[,c(i,5)], Groups == "Visit_1")[,1], subset(staphs_df[,c(i,5)], Groups =="Visit_4")[,1])
+  staph_info = rbind(staph_info, data.frame("Taxa" = taxa, "Visit1" = avg_v1, "Visit3" = avg_v3, "Visit4" = avg_v4, "V4-V1" = avg_v4-avg_v1, "v3-V1" = avg_v3 - avg_v1,  "P_Visit_Diff_1_4" = as.numeric(p_v1_v4$p.value), "P_Visit_Diff_1_3" = as.numeric(p_v1_v3$p.value)))
+  
+}
+
+# For things that are not staph
+
+search_terms= c("Corynebacterium", "Micrococcus", "Cutibacterium", "Paracoccus", "Acinetobacter", "Bacteroidetes", "Proteobacteria")
+
+taxa_of_interest_stats = list()
+
+for (i in search_terms){
+  # i = "Micrococcus"
+  specs_loc = grep(i, colnames(noforearm_nobadtps))
+  # specs = colnames(healthy_vs_patients_baseline)[specs_loc]
+  specs_df = data.frame(noforearm_nobadtps[,specs_loc])
+  specs_df$Total_bug = rowSums(specs_df) 
+  colnames(specs_df)[ncol(specs_df)] = i
+  # taxa_of_interest_stats = cbind(taxa_of_interest_stats, data.frame(specs_df[,ncol(specs_df), drop=FALSE]))
+  taxa_of_interest_stats[[i]] = data.frame(specs_df[,ncol(specs_df), drop=FALSE])
+  
+}
+
+
+stats_df = as.data.frame(taxa_of_interest_stats)
+stats_df = stats_df[!(endsWith(rownames(stats_df), "control")),]
+
+
+stats_df <- stats_df %>%
+  rownames_to_column() %>%
+  mutate(Groups = case_when(rownames(staphs_df) %in% visit1_samps ~"Visit_1",
+                           rownames(staphs_df) %in% visit2_samps ~"Visit_2",
+                           rownames(staphs_df) %in% visit3_samps~"Visit_3",
+                           rownames(staphs_df) %in% visit4_samps ~"Visit_4")) %>%
+  column_to_rownames()
+
+
+
+stats_info = data.frame()
+
+for (i in 1:(length(colnames(stats_df))-1)){
+  # i = 1
+  taxa = colnames(stats_df)[i]
+  avg_v1 = mean(subset(stats_df[,c(i,8)], Groups == "Visit_1")[,1]) * 100
+  avg_v3 = mean(subset(stats_df[,c(i,8)], Groups == "Visit_3")[,1]) * 100
+  avg_v4 = mean(subset(stats_df[,c(i,8)], Groups == "Visit_4")[,1]) * 100
+  
+  #tests
+  p_v1_v3 = wilcox.test(subset(stats_df[,c(i,8)], Groups == "Visit_1")[,1], subset(stats_df[,c(i,8)], Groups =="Visit_3")[,1])
+   p_v1_v4 = wilcox.test(subset(stats_df[,c(i,8)], Groups == "Visit_1")[,1], subset(stats_df[,c(i,8)], Groups =="Visit_4")[,1])
+  
+  stats_info = rbind(stats_info, data.frame("Taxa" = taxa, "Visit1" = avg_v1, "Visit3" = avg_v3, "Visit4" = avg_v4, "V4-V1" = avg_v4-avg_v1, "v3-V1" = avg_v3 - avg_v1,  "P_Visit_Diff_1_4" = as.numeric(p_v1_v4$p.value), "P_Visit_Diff_1_3" = as.numeric(p_v1_v3$p.value)))
+  
+}
+
+
+big_info_table = rbind(staph_info, stats_info)
+
+#clean up the names for legibilitiy
+big_info_table <- big_info_table %>%
+  mutate(Taxa = as.character(Taxa)) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus", "Staphyloccoccus aureus")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis", "Staphyloccocus epidermidis")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis", "Staphyloccoccus capitis")) %>%
+  mutate(Taxa = replace(Taxa, Taxa == "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.hominis", "Staphylococcus hominis"))
+
+write.csv(big_info_table, paste(table_dir, "tabl3_v1_to_v3_v4_comparisons.csv", sep = "/") )
+
+
+
+```
+
+
+### Fig 3a
+
+Plotting bar charts across visits
+
+```{r, warning = FALSE}
+
+
+levels = c("Species", "Genus", "Phylum")
+
+cutoff = 0.05
+across_visits_collapsed = generate_collapsed_counts_df(visit_merge_physeq, cutoff, taxonomic_levels_ofinterest = levels)
+
+
+longitudinal_lesional_comparison = plot_collapsed_counts(across_visits_collapsed, sample_order = c("visit_1", "visit_2", "visit_3", "visit_4")) 
+
+
+ggsave(paste(image_outdir, "figure3b_longtidunal_lesional_comparison.pdf", sep = "/"), longitudinal_lesional_comparison, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+ggsave(paste(image_outdir, "figure3b_longtidunal_lesional_comparison.png", sep = "/"),longitudinal_lesional_comparison, device = "png", dpi = 300, height = 12, width = 8)
+
+longitudinal_lesional_comparison
+
+```
+
+## 3c SCORAD decreases from visit 1 to visit 4 for all subjects
+
+This section creates its own df bc we want to use SCORAD data from samples that may have been removed 
+
+```{r}
+
+#Required dataframes:
+# meta
+
+subjects = unique(as.character(meta$Subject))
+subjects = subjects[!endsWith(subjects, "control")] #We don't need controls here
+
+
+dereplicated_scorads = data.frame()
+for (i in subjects){
+  # print(i)
+  tps = unique(as.character((meta[meta$Subject==i,]$Visit)))
+  tps = tps[!is.na(tps) & tps != 5] #remove fifth visit
+  for (visit in tps){
+    scorad= unique(subset(meta, Subject ==i & Visit==visit)$ScoradTotal)
+    bleach = as.character(unique(subset(meta, Subject ==i & Visit==visit)$ChlorineBath))
+    dereplicated_scorads = rbind(dereplicated_scorads, data.frame("Subject" = as.numeric(i), "Visit" = as.numeric(visit), "Scorad" = as.numeric(scorad), "ChlorineBath" = bleach))
+  }
+}
+
+# This dataframe is missing exactly 1 datapoint. Add it in:
+
+dereplicated_scorads[105,] = c("28", "4",27.4, "N")
+
+#Remove badtaps
+
+dereplicated_scorads$SampleName = paste(dereplicated_scorads$Subject, "v", dereplicated_scorads$Visit, sep = "_")
+dereplicated_scorads = subset(dereplicated_scorads, dereplicated_scorads$SampleName %!in% bad_tps)
+
+#Boxplot of SCORAD over time for all patients (figure 3c.)
+
+scorad_boxplot = ggplot(dereplicated_scorads, aes(x = factor(Visit, levels = c(1:4)), y = as.numeric(Scorad)))+
+  geom_boxplot(color = "grey70", outlier.colour = NA)+
+  labs(x = "Visit", y = "SCORAD")+
+  geom_jitter(color = "grey30")+
+  labs(title = "SCORAD decreases over course of treatment")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggsave(paste(image_outdir, "figure3c_scorad_decrease_boxplot.pdf", sep = "/"), scorad_boxplot, device = "pdf", dpi = 300, useDingbats = FALSE, height = 6, width = 8)
+
+
+ggsave(paste(image_outdir, "figure3c_scorad_decrease_boxplot.png", sep = "/"), scorad_boxplot, device = "png", dpi = 300)
+
+
+scorad_boxplot
+
+```
+
+# Figure 4: 
+### S. aureus abundance but not SCORAD is significantly lower in patients after DBB treatment.
+
+
+## 4a calculate s aureus rel abundance
+
+```{r}
+#Grab the relative abundances of different useful OTUs in all samples 
+
+otu_table_ofinterest = noforearm_nobadtps
+meta_of_interest = meta_noforearm_nobadtps
+
+
+# otu_table_ofinterest = noforearm_nobadtps
+# meta_of_interest = meta_noforearm_nobadtps
+
+#Grab info on the % of relevant bugs in all samples 
+rel_staph_aureus_all = data.frame()
+
+for (i in 1:nrow(otu_table_ofinterest)){
+  samplename = rownames(otu_table_ofinterest)[i]
+  staphaur = otu_table_ofinterest[rownames(otu_table_ofinterest)==samplename, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"]
+  staphepi = otu_table_ofinterest[rownames(otu_table_ofinterest)==samplename, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis"]
+  ochro = otu_table_ofinterest[rownames(otu_table_ofinterest)==samplename,"Bacteria.Proteobacteria.Alphaproteobacteria.Rhizobiales.Rhizobiaceae.Ochrobactrum.__"]
+  para = otu_table_ofinterest[rownames(otu_table_ofinterest)==samplename,"Bacteria.Proteobacteria.Alphaproteobacteria.Rhodobacterales.Rhodobacteraceae.Paracoccus.__"]
+  rel_staph_aureus_all = rbind(rel_staph_aureus_all, data.frame("Rel_Staph_Aureus" = staphaur, "Rel_Staph_epi" = staphepi, "Rel_Ochro" = ochro, "Rel_Para" = para, row.names = samplename))
+}
+meta_of_interest = cbind(meta_of_interest, rel_staph_aureus_all)
+
+meta_of_interest = meta_of_interest[!endsWith(as.character(meta_of_interest$Subject), "control"),]
+# meta_of_interest = subset(meta_of_interest, Visit !=5)
+
+```
+
+##4d SCORAD
+
+```{r}
+
+# SCORAD differences between groups, using the same dataframe 
+
+counts = dereplicated_scorads %>% group_by(ChlorineBath, Visit) %>% tally #random switch to dplyr lingo i know
+
+# what are the SCORAD averages at different timepoints?
+
+scorad_visits = c(1,2,3,4)
+
+scorad_avgs = data.frame()
+
+for (visit in scorad_visits){
+  nbb_mean = round(median(as.numeric(subset(dereplicated_scorads, ChlorineBath=="N"& Visit == visit)$Scorad)),2)
+  bb_mean = round(median(as.numeric(subset(dereplicated_scorads, ChlorineBath=="Y"& Visit == visit)$Scorad)),2)
+  total_mean = round(median(as.numeric(subset(dereplicated_scorads, Visit == visit)$Scorad)),2)
+  nbb_counts = as.character(counts[counts$Visit==visit & counts$ChlorineBath == "N",]$n)
+  bb_counts = as.character(counts[counts$Visit==visit & counts$ChlorineBath == "Y",]$n)
+  scorad_avgs = rbind(scorad_avgs, data.frame("Visit" = visit, "DBB_Y_SCORAD" = bb_mean, "DBB_N_SCORAD" = nbb_mean, "SCORAD_avg" = total_mean, "nbb_count" = nbb_counts, "bb_counts" = bb_counts))
+}
+
+# max(as.numeric(subset(dereplicated_scorads, ChlorineBath=="N"& Visit == "3")$Scorad))
+
+visit_1_scorads  = as.numeric(subset(dereplicated_scorads,Visit == 1)$Scorad)
+visit_4_scorads = as.numeric(subset(dereplicated_scorads,Visit == 4)$Scorad)
+
+scorad_p = wilcox.test(visit_1_scorads, visit_4_scorads)
+
+visits.labs =  c("Visit 1", "Visit 2", "Visit 3", "Visit 4")
+names(visits.labs) = c("1","2","3","4")
+
+chlorbath_cols = c("Y" = "#00A39E", "N" = "#F5BB00")
+
+scorad_bleach_box = ggplot(dereplicated_scorads, aes(x=ChlorineBath, y=as.numeric(Scorad)))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2, aes(color=ChlorineBath))+
+  facet_grid(.~as.numeric(Visit), labeller = as_labeller(visits.labs)) +
+  geom_signif(comparisons = list(c("Y", "N")), test = wilcox.test)+
+  scale_color_manual(values = chlorbath_cols, name = "DBB")+
+  labs(title = "Differences in SCORAD between groups", subtitle = "wilcox test applied", x = "Visit", y = "SCORAD")+
+  geom_text(data=counts, aes(label=paste0("N=",n)), y=-3, color = "grey60")+
+  scale_y_continuous(limits = c(-3, 90), breaks = seq(0,80,10))+ #hacky way to get obs in the plot
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+
+ggsave(paste(image_outdir, "figure4d_scorad_decrease_bleach_boxplot.pdf", sep = "/"), scorad_bleach_box, device = "pdf", dpi = 300, useDingbats = FALSE, height = 7, width = 10)
+
+
+ggsave(paste(image_outdir, "figure4d_scorad_decrease_bleach_boxplot.png", sep = "/"), scorad_bleach_box, device = "png", dpi = 300, height = 7, width = 10)
+
+scorad_bleach_box
+```
+
+## 4b staph aureus and visit 
+
+```{r}
+
+#Staph aureus differences between groups
+
+#avg scorad at diff visits - particularly 3 and 4, where it looks interesting
+
+v3_bleach = mean(subset(meta_of_interest, ChlorineBath == "Y" & Visit ==3)$Rel_Staph_Aureus)
+v4_bleach = mean(subset(meta_of_interest, ChlorineBath == "Y" & Visit ==4)$Rel_Staph_Aureus)
+
+v3_nobleach = mean(subset(meta_of_interest, ChlorineBath == "N" & Visit ==3)$Rel_Staph_Aureus)
+v4_nobleach = mean(subset(meta_of_interest, ChlorineBath == "N" & Visit ==4)$Rel_Staph_Aureus)
+
+
+chlorbath_cols = c("Y" = "firebrick1", "N" = "royalblue")
+
+counts = meta_of_interest %>% group_by(ChlorineBath, Visit) %>% tally #random switch to dplyr lingo i know
+
+visits.labs =  c("Visit 1", "Visit 2", "Visit 3", "Visit 4")
+names(visits.labs) = c("1","2","3","4")
+meta_of_interest$Visit = as.character(meta_of_interest$Visit)
+
+chlorbath_cols = c("Y" = "#00A39E", "N" = "#F5BB00")
+
+
+staph_bleach_box = ggplot(meta_of_interest, aes(x=ChlorineBath, y=Rel_Staph_Aureus))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2, aes(color=ChlorineBath))+
+  scale_color_manual(values = chlorbath_cols, name = "DBB")+
+  facet_grid(~as.numeric(Visit), labeller = as_labeller(visits.labs)) +
+  geom_signif(comparisons = list(c("Y", "N")), test = wilcox.test)+
+  labs(title = "Differences in S. aureus between groups", subtitle = "wilcox test applied", y = "Relative Abundance of S. aureus")+
+  geom_text(data=counts, aes(label=paste0("N=",n)), y=-0.1, color = "grey60")+
+  scale_y_continuous(limits = c(-0.1, 1.05), breaks = seq(0,1,0.25))+ #hacky way to get obs in the plot 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+ggsave(paste(image_outdir, "figure4b_staph_decrease_bleach_boxplot.pdf", sep = "/"), staph_bleach_box, device = "pdf", dpi = 300, useDingbats = FALSE,height = 7, width = 10)
+
+ggsave(paste(image_outdir, "figure4b_staph_decrease_bleach_boxplot.png", sep = "/"), staph_bleach_box, device = "png", dpi = 300, height = 7, width = 10)
+
+staph_bleach_box
+
+
+```
+
+## 4b lesional sites
+
+
+
+```{r}
+
+# meta_humans_only_merge_replicates_sites_4
+site_meta_4 = subset(site_meta, Visit !=5 & !is.na(Active_Dermatitis))
+site_meta_4$SampleName = paste(site_meta_4$Subject, "v", site_meta_4$Visit, sep = "_")
+site_meta_4 = subset(site_meta_4, SampleName %!in% bad_tps) #remove bad timepoints
+
+# subjects = unique(as.character(meta_humans_only_merge_replicates_sites_4$Subject))
+subjects = unique(as.character(site_meta_4$Subject))
+
+lesional_sites_across_groups = data.frame()
+
+for (subj in subjects){
+  # subj = 1
+  tps = unique(as.character(subset(site_meta_4, Subject == subj)$Visit))
+  for (visit in tps){
+    # visit = 1
+    minimeta = subset(site_meta_4, Subject ==subj & Visit == visit)
+    number_of_lesional_sites = minimeta$Active_Dermatitis
+    number_of_lesional_sites = number_of_lesional_sites[number_of_lesional_sites !=0]
+    
+    numlesional = data.frame(Subject = subj, Visit = visit, Lesional_Sites = length(number_of_lesional_sites), Perc_Lesional = (length(number_of_lesional_sites)/4)*100 )
+    lesional_sites_across_groups = rbind(lesional_sites_across_groups, numlesional)
+  }
+}
+
+
+lesional_sites_bath = merge(x=lesional_sites_across_groups, y=dereplicated_scorads, by = c("Subject", "Visit"), all.x=TRUE)
+
+#some investigative work reveals that subject 28 had a scorad of 27.2 at viisit 4 and was NOT treated with dbb - see "base de datos para metrica diana"
+
+lesional_sites_bath[nrow(lesional_sites_bath),6] = "N" #tiny little missing data point gets filled in
+lesional_sites_bath[nrow(lesional_sites_bath),5] = 27.2
+ 
+
+counts =  lesional_sites_bath %>% group_by(ChlorineBath, Visit) %>% tally
+lesional_sites_bath$Visit = as.character(lesional_sites_bath$Visit)
+
+visits.labs =  c("Visit 1", "Visit 2", "Visit 3", "Visit 4")
+names(visits.labs) = c("1","2","3","4")
+
+chlorbath_cols = c("Y" = "#00A39E", "N" = "#F5BB00")
+
+lesional_box = ggplot(lesional_sites_bath, aes(x=ChlorineBath, y =  Lesional_Sites, group = as.character(ChlorineBath)))+
+  stat_summary(fun.y=mean,lwd=1, geom = "errorbar", 
+               aes(ymax = ..y.., ymin = ..y.., group = factor(ChlorineBath)), color = "grey40")+
+  geom_jitter(width = 0.35, height = 0.1, size = 2, aes(color=ChlorineBath))+
+  scale_color_manual(values = chlorbath_cols, name = "DBB")+
+  facet_grid(~Visit, labeller = as_labeller(visits.labs)) +
+  geom_signif(comparisons = list(c("Y", "N")), test = wilcox.test, y_position = c(4.5,5))+
+  labs(y = "Number of Lesional Sites" )+
+  geom_text(data=counts, aes(label=paste0("N=",n)), y=-0.5, color = "grey60")+
+  scale_y_continuous(limits = c(-0.5, 4.5), breaks = seq(0,4.5,1)) +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank(), axis.text.y = element_text(size=12)) 
+# labs(title = "Differences in number of lesional sites", subtitle = "wilcox test applied", y = "Number of Lesional Sites" )+
+  
+ggsave(paste(image_outdir, "figure4b_num_lesional_sites.pdf", sep = "/"), lesional_box, device = "pdf", dpi = 300, useDingbats = FALSE, height = 7, width = 10)
+
+ggsave(paste(image_outdir, "figure4b_num_lesional_sites.png", sep = "/"), lesional_box, device = "png", dpi = 300, height = 7, width = 10)
+
+lesional_box
+
+```
+
+
+
+### 4c Individual Trajectories over time
+
+
+```{r}
+ 
+bleach.labs = c("+ DBB", "- DBB")
+names(bleach.labs) = c("Y", "N")
+
+chlorbath_cols = c("Y" = "#00A39E", "N" = "#F5BB00")
+
+#Individual Rho vals from spearman for both groups (DBB vs bot DBB)
+
+dbb_patients = subset(meta_of_interest, ChlorineBath == "Y")
+spear_test_dbb = cor.test(dbb_patients$ScoradTotal, as.numeric(dbb_patients$Visit), method = "spearman")
+rhoval_dbb = paste("Spearman's Rho:",round(as.numeric(spear_test_dbb$estimate), digits=3))
+
+not_dbb_paients = subset(meta_of_interest, ChlorineBath == "N")
+spear_test_nd = cor.test(not_dbb_paients$ScoradTotal, as.numeric(not_dbb_paients$Visit), method = "spearman")
+rhoval_nd = paste("Spearman's Rho:",round(as.numeric(spear_test_nd$estimate), digits =3))
+
+#Annotation df
+dat_text = data.frame(label = c(rhoval_dbb, rhoval_nd), ChlorineBath = c("Y", "N"))
+
+staph_scorad_bleach = ggplot(meta_of_interest, aes(y = ScoradTotal, x=as.numeric(Visit)))+
+  geom_point(aes(color=Rel_Staph_Aureus), size = 5) + 
+    geom_point(shape = 1, size = 5,colour = "black")+ #this adds an outline
+  scale_color_gradient(low = "grey90", high = "grey10", breaks = seq(0,1,0.25), labels= seq(0,1,0.25), name = "S. aureus", limits = c(0,1))+
+  geom_line(aes(group=Subject), color = "grey80", alpha=0.6)+
+  facet_grid(.~ChlorineBath, labeller = as_labeller(bleach.labs))+
+  theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_blank(), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12), strip.text = element_text(size=12), legend.position = "bottom" , legend.title = element_blank()) +
+  geom_text(data=dat_text, mapping = aes(x=1.75,  y=2, label = label), color = "grey40", size = 3)+
+  # geom_smooth(method="lm", formula = y~x, aes(y = ScoradTotal, x=as.numeric(Visit)), se=FALSE, alpha =0.6, color ="grey40")+
+  # stat_poly_eq(formula = y ~x,
+  #               aes(label = paste( ..rr.label.., sep = "~~~")), 
+  #               parse = TRUE, color = "grey40",label.x = 3, label.y = 82, size = 5) +
+  labs(x="Visit", y = "SCORAD")
+
+ggsave(paste(image_outdir, "figure4c_staph_scorad_decrease_comparison_bleach_boxplot.pdf", sep = "/"), staph_scorad_bleach, device = "pdf", dpi = 300, useDingbats = FALSE, height = 7, width = 10)
+
+ggsave(paste(image_outdir, "figure4c_staph_scorad_decrease_comparison_bleach_boxplot.png", sep = "/"), staph_scorad_bleach, device = "png", dpi = 300, height = 7, width = 10)
+
+staph_scorad_bleach
+```
+
+
+
+# Supplemental Figures
+
+### S1a
+
+Bar charts of community composition separated by DBB/ not DBB
+with forearm
+
+```{r}
+
+#Required dataframes:
+# noforearm_nobadtps
+# meta_noforearm_nobadtps
+
+#First we must merge all patients per visit
+
+merged_across_visits_dbb = data.frame()
+merged_across_visits_ndbb = data.frame()
+
+for (visit in c(1:4)){
+  meta_visit = subset(meta_noforearm_nobadtps, Visit == visit)
+  
+  meta_visit_samps_dbb = rownames(subset(meta_visit, ChlorineBath == "Y"))
+  meta_visit_samps_ndbb = rownames(subset(meta_visit, ChlorineBath == "N"))
+  
+  meta_visit_samps_dbb_otus = noforearm_nobadtps[rownames(noforearm_nobadtps) %in% meta_visit_samps_dbb,]
+  meta_visit_samps_ndbb_otus = noforearm_nobadtps[rownames(noforearm_nobadtps) %in% meta_visit_samps_ndbb,]
+  
+  
+  meta_dbb_otus_mean = apply(meta_visit_samps_dbb_otus, 2, FUN=mean)
+  meta_ndbb_otus_mean = apply(meta_visit_samps_ndbb_otus, 2, FUN=mean)
+  
+  
+  meta_visit_samps_dbb_otus = rbind(meta_visit_samps_dbb_otus, meta_dbb_otus_mean)
+  rownames(meta_visit_samps_dbb_otus)[nrow(meta_visit_samps_dbb_otus)] = paste("visit", visit, sep = "_")
+  
+  meta_visit_samps_ndbb_otus = rbind(meta_visit_samps_ndbb_otus, meta_ndbb_otus_mean)
+  rownames(meta_visit_samps_ndbb_otus)[nrow(meta_visit_samps_ndbb_otus)] = paste("visit", visit, sep = "_")
+  
+  
+  
+  merged_across_visits_dbb = rbind(merged_across_visits_dbb , meta_visit_samps_dbb_otus[nrow(meta_visit_samps_dbb_otus),])
+  merged_across_visits_ndbb = rbind(merged_across_visits_ndbb , meta_visit_samps_ndbb_otus[nrow(meta_visit_samps_ndbb_otus),])
+  
+}
+
+#Coerce to physeq
+
+meta_merged_across_visits_dbb = data.frame("Sample_Name" = rownames(merged_across_visits_dbb), row.names = rownames(merged_across_visits_dbb), "ChlorineBath" = rep("Y", length(rownames(merged_across_visits_dbb))))
+
+meta_merged_across_visits_ndbb = data.frame("Sample_Name" = rownames(merged_across_visits_ndbb), row.names = rownames(merged_across_visits_ndbb), "ChlorineBath" = rep("N", length(rownames(merged_across_visits_ndbb))))
+                                       
+# meta_merged_across_visits$StaphAur = sapply(meta_merged_across_visits_dbb$Sample_Name, function(x) merged_across_visits_dbb[rownames(merged_across_visits_dbb)==x, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+
+visit_merge_physeq_dbb = coerce_to_phyloseq(merged_across_visits_dbb, meta_merged_across_visits_dbb)
+visit_merge_physeq_ndbb = coerce_to_phyloseq(merged_across_visits_ndbb, meta_merged_across_visits_ndbb)
+
+```
+
+DBB
+ 
+```{r}
+
+
+cutoff = 0.05
+levels = c("Species", "Genus", "Phylum")
+dbb_visits_collapsed = generate_collapsed_counts_df(visit_merge_physeq_dbb, cutoff, taxonomic_levels_ofinterest = levels)
+
+longtidunal_dbb_comparison = plot_collapsed_counts(dbb_visits_collapsed, sample_order = c("visit_1", "visit_2", "visit_3", "visit_4") )
+
+
+ggsave(paste(image_outdir, "supp_fig1_dbb_longitudinal.pdf", sep = "/"), longtidunal_dbb_comparison, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+ggsave(paste(image_outdir, "supp_fig1_dbb_longitudinal.png", sep = "/"),longtidunal_dbb_comparison, device = "png", dpi = 300, height = 12, width = 8)
+
+longtidunal_dbb_comparison
+
+
+
+```
+ 
+NDBB
+
+```{r}
+
+
+cutoff = 0.05
+levels = c("Species", "Genus", "Phylum")
+ndbb_visits_collapsed = generate_collapsed_counts_df(visit_merge_physeq_ndbb, cutoff, taxonomic_levels_ofinterest = levels)
+
+longtidunal_ndbb_comparison = plot_collapsed_counts(ndbb_visits_collapsed,  sample_order = c("visit_1", "visit_2", "visit_3", "visit_4") )
+
+
+ggsave(paste(image_outdir, "supp_fig1_nddb_longitudinal.pdf", sep = "/"), longtidunal_ndbb_comparison, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+ggsave(paste(image_outdir, "supp_fig1_nddb_longitudinal.png", sep = "/"),longtidunal_ndbb_comparison, device = "png", dpi = 300, height = 12, width = 8)
+
+longtidunal_ndbb_comparison
+
+```
+
+
+### S1b
+S aureus decreases signficantly within each group between visit 1 anf visit 4
+
+```{r}
+
+# Group without DBB
+
+nobleach_comparison = subset(meta_of_interest, ChlorineBath == "N" & Visit %in% c(1,4))
+nobleach_comparison$Visit = factor(nobleach_comparison$Visit, levels = c(1,4))
+
+ndbb_staph_comp = ggplot(nobleach_comparison, aes(x=Visit, y=Rel_Staph_Aureus, group = factor(Visit, levels = c(1,4))))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2)+
+  geom_signif(comparisons = list(c("1", "4")), test = wilcox.test)+
+  labs(title = "Differences in S. aureus within no DBB group", subtitle = "wilcox test applied", y = "Relative Abundance of S. aureus")+
+  scale_y_continuous(limits = c(-0.1, 1.05), breaks = seq(0,1,0.25))+ #hacky way to get obs in the plot 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.title.y = element_text(vjust = 3))
+
+
+ggsave(paste(image_outdir, "supplement_figs/supplement_ndbb_staph_comp.png", sep = "/"), ndbb_staph_comp, device = "png", dpi = 300, height = 7, width = 10)
+
+ggsave(paste(image_outdir, "supplement_figs/supplement_f1_ndbb_staph_comp.pdf", sep = "/"), ndbb_staph_comp, device = "pdf", dpi = 300, height = 7, width = 10, useDingbats = FALSE)
+
+
+bleach_comparison = subset(meta_of_interest, ChlorineBath == "Y" & Visit %in% c(1,4))
+bleach_comparison$Visit = factor(bleach_comparison$Visit, levels = c(1,4))
+
+dbb_staph_comp = ggplot(bleach_comparison, aes(x=Visit, y=Rel_Staph_Aureus, group = factor(Visit, levels = c(1,4))))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2)+
+  geom_signif(comparisons = list(c("1", "4")), test = wilcox.test)+
+  labs(title = "Differences in S. aureus within DBB group", subtitle = "wilcox test applied", y = "Relative Abundance of S. aureus")+
+  scale_y_continuous(limits = c(-0.1, 1.05), breaks = seq(0,1,0.25))+ #hacky way to get obs in the plot 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.title.y = element_text(vjust = 3))
+
+ggsave(paste(image_outdir, "supplement_figs/supplement_f1_dbb_staph_comp.pdf", sep = "/"), dbb_staph_comp, device = "pdf", dpi = 300, height = 7, width = 10,useDingbats = FALSE)
+
+
+ggsave(paste(image_outdir, "supplement_figs/supplement_dbb_staph_comp.png", sep = "/"), dbb_staph_comp, device = "png", dpi = 300, height = 7, width = 10)
+
+
+
+```
+
+
+### S1c
+
+shanon div of sites in dbb / not dbb - no forearm, merged across sites 
+
+```{r}
+
+#start w a netadata table of samples merged without forearm excluding visit 5 and healthy controls -- meta_of_interest
+
+longitudinal_samples = c(as.character(meta_of_interest$SampleName))
+
+longitudinal_otus = subset(noforearm_nobadtps, rownames(noforearm_nobadtps) %in% longitudinal_samples)
+
+# calculate shanon
+
+longitudinal_shanon = as.data.frame(diversity(longitudinal_otus, index = "shannon", MARGIN = 1, base = exp(1)), row.names = rownames(longitudinal_otus))
+
+colnames(longitudinal_shanon) = c("Shanon_Div")
+
+meta_of_interest$Shanon_div = with(longitudinal_shanon, Shanon_Div[match(rownames(longitudinal_shanon), meta_of_interest$SampleName)]) #best lookup function EVER
+
+# longitudinal_shanon$ChlorineBath = with(meta_of_interest, ChlorineBath[match(meta_of_interest$SampleName, rownames(longitudinal_shanon))]) 
+
+#Boxplot
+
+counts = meta_of_interest %>% group_by(ChlorineBath, Visit) %>% tally #random switch to dplyr lingo i know
+
+visits.labs =  c("Visit 1", "Visit 2", "Visit 3", "Visit 4")
+names(visits.labs) = c("1","2","3","4")
+
+chlorbath_cols = c("Y" = "#00A39E", "N" = "#F5BB00")
+
+shanon_div_box = ggplot(meta_of_interest, aes(x=ChlorineBath, y=Shanon_div))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2, aes(color=ChlorineBath))+
+  scale_color_manual(values = chlorbath_cols, name = "DBB")+
+  facet_grid(~as.numeric(Visit), labeller = as_labeller(visits.labs)) +
+  geom_signif(comparisons = list(c("Y", "N")), test = wilcox.test)+
+  labs(title = "Differences in Shanon between groups", subtitle = "wilcox test applied", y = "Shanon Diversity")+
+  geom_text(data=counts, aes(label=paste0("N=",n)), y=-0.25, color = "grey60")+
+  scale_y_continuous(limits = c(-0.35, 5.25), breaks = seq(0,5.25,1))+ #hacky way to get obs in the plot 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.background = element_rect(),panel.border = element_rect(color=NA), strip.background = element_rect(fill="white", color = "white"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+ggsave(paste(image_outdir, "supp_fig1_shanon_box.pdf", sep = "/"), shanon_div_box, device = "pdf", dpi = 300, useDingbats = FALSE,height = 7, width = 10)
+
+ggsave(paste(image_outdir, "supp_fig1_shanon_box.png", sep = "/"), shanon_div_box, device = "png", dpi = 300, height = 7, width = 10)
+
+shanon_div_box
+
+
+
+```
+
+
+## Supplemental figure 3
+Composition underlying S. aureus dominance
+
+What do the compositions of samples under S. aureus dominance look like? Are they more similar within a group or acros groups (healty vs AD, non-lesional vs lesional)
+
+### Setup
+Create necessary objects
+```{r}
+# To do out analyses about whats underneath s. aureus dominance, we will need a df with nostaph
+
+#reads
+humans_only_merge_replicates_reads_nostaph = humans_only_merge_replicates_reads[,colnames(humans_only_merge_replicates_reads)!="Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"]
+
+humans_only_merge_replicates_reads_nostaph = humans_only_merge_replicates_reads_nostaph[,colSums(humans_only_merge_replicates_reads_nostaph) !=0]
+
+#Lets look at the distribution of reads and see if there's any we should remove
+
+nostaph_reads = data.frame("Sample" = rownames(humans_only_merge_replicates_reads_nostaph), "Reads" = rowSums(humans_only_merge_replicates_reads_nostaph))
+#We have some weird numbers from all the merging, so lets round to the nearest integer
+nostaph_reads$Reads = round(nostaph_reads$Reads, digits = 0)
+
+# I want to know how much s. aureus is in these samples
+staph_rel_abund  = data.frame()
+for (sub in as.character(nostaph_reads$Sample)){
+  sample_staph = mean(humans_only_merge_replicates[rownames(humans_only_merge_replicates) == sub, colnames(humans_only_merge_replicates)=="Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+  temp= data.frame("Sample" = sub, "Staph_Rel_Abund" = sample_staph)
+  staph_rel_abund= rbind(staph_rel_abund , temp)
+}
+nostaph_reads = merge(nostaph_reads, staph_rel_abund, by = "Sample")
+
+# we can see that the samples that have the highest amount of staph have the fewest reads also
+ggplot(nostaph_reads, aes(x=Reads))+
+  geom_histogram(binwidth = 100)+
+  scale_x_continuous(breaks = seq(0, max(nostaph_reads$Reads), 500))+
+  geom_vline(xintercept=300, color = "red")
+
+#Cutoff is 300 reads. 
+samps_below_cutoff = as.character(nostaph_reads[nostaph_reads$Reads< 300,]$Sample)
+
+# healthy_controls = healthy_controls[healthy_controls %!in% samps_below_cutoff]
+# visit_1_patients = visit_1_patients[visit_1_patients %!in% samps_below_cutoff]
+
+humans_only_merge_replicates_reads_nostaph_filtered = humans_only_merge_replicates_reads_nostaph[rownames(humans_only_merge_replicates_reads_nostaph) %!in% samps_below_cutoff,]
+
+humans_only_merge_replicates_reads_nostaph_filtered = humans_only_merge_replicates_reads_nostaph_filtered[,colSums(humans_only_merge_replicates_reads_nostaph_filtered) !=0]
+
+
+#Calculate rel abunds
+
+nostaph_filtered.norm = data.frame(t(apply(humans_only_merge_replicates_reads_nostaph_filtered, 1, function(x) x/sum(x)))) 
+
+#create metadta file
+meta_nostaph_filtered.norm = meta_humans_only_merge_replicates_sites[rownames(meta_humans_only_merge_replicates_sites) %!in% samps_below_cutoff,]
+
+#Remove visit 5
+
+meta_nostaph_filtered.norm = subset(meta_nostaph_filtered.norm, Visit !=5)
+nostaph_filtered.norm = nostaph_filtered.norm[rownames(nostaph_filtered.norm) %in% rownames(meta_nostaph_filtered.norm),]
+
+```
+
+
+### S fig 3 (a): Composition under S aureus 
+
+Visit 1 bar chart
+```{r}
+
+# Baseline samples:
+visit_1_meta = subset(meta_humans_only_merge_replicates_sites, Visit == "1") #Subset to baseline samples only
+
+#subset sample names of healthy controls
+healthy_controls = rownames(subset(visit_1_meta, endsWith(as.character(visit_1_meta$Subject), "control"))) #controls
+
+#Subset patients into their own df
+visit_1_patients = rownames(visit_1_meta[rownames(visit_1_meta) %!in% healthy_controls,]) # patients
+
+
+#Prepare to merge samples over 300 reads
+
+# 1--- compare healthy controls to all sites on AD patients 
+baseline_samples = list("healthy" = healthy_controls, "AD_patients" = visit_1_patients)
+
+merged_at_baseline_nostaph = data.frame()
+
+for (i in names(baseline_samples)){
+  condition = i
+  samples = as.character(unlist(baseline_samples[i]))
+  temp_otus_nostaph = nostaph_filtered.norm[rownames(nostaph_filtered.norm) %in% samples,]
+  means_otus_nostaph = apply(temp_otus_nostaph, 2, FUN=mean)
+  temp_otus_nostaph = rbind(temp_otus_nostaph, means_otus_nostaph)
+  rownames(temp_otus_nostaph)[nrow(temp_otus_nostaph)] = condition
+  merged_at_baseline_nostaph= rbind(merged_at_baseline_nostaph, temp_otus_nostaph[nrow(temp_otus_nostaph),])
+}
+
+#Remove empty columns
+
+merged_at_baseline_nostaph = merged_at_baseline_nostaph[,colSums(merged_at_baseline_nostaph)!=0]
+
+#Create a dummy metadata file 
+baseline_meta_nostaph = data.frame("Sample_Name" = rownames(merged_at_baseline_nostaph), row.names = rownames(merged_at_baseline_nostaph))
+baseline_meta_nostaph$StaphAur = sapply(baseline_meta_nostaph$Sample_Name, function(x) nostaph_reads[rownames(nostaph_reads)==x, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"])
+
+#Coerce to phyloseq, which organises taxonomic info and sample info in a very nice and intuitive way
+
+baseline_nostaph_physeq = coerce_to_phyloseq(merged_at_baseline_nostaph, baseline_meta_nostaph)
+
+
+#What do these charts look like if you remove staph?
+
+levels = c("Species", "Genus", "Phylum")
+
+cutoff = 0.05
+
+plot_counts_nostaph = generate_collapsed_counts_df(baseline_nostaph_physeq, cutoff, taxonomic_levels_ofinterest = levels)
+
+baseline_health_AD_nostaph = plot_collapsed_counts(plot_counts_nostaph, sample_order = c("healthy", "AD_patients"))
+
+ggsave(paste(image_outdir, "figure2.5a_NOSTAPH_baseline_Healthy_patients_comparison.pdf", sep = "/"), baseline_health_AD_nostaph, device = "pdf", dpi = 300, useDingbats = FALSE, height = 8, width = 6)
+
+ggsave(paste(image_outdir, "figure2.5a_NOSTAPH_baseline_Healthy_patients_comparison.png", sep = "/"), baseline_health_AD_nostaph, device = "png", dpi = 300, height = 12, width = 8)
+
+
+baseline_health_AD_nostaph
+
+
+
+```
+
+### S fig 3 c Shannon diversity underlying S. aureus dominance
+
+Shannon X SCORAD for AD patients at baseline but with s aureus removed. 
+
+Alpha diversity of all sites without forearm X SCORAD, and spearman's rho
+
+```{r}
+
+#Required dataframes:
+#nostaph_filtered.norm
+#meta_nostaph_filtered.norm
+
+# Remove forearm from our dataset
+
+meta_nostaph_filtered.norm_noforearm = subset(meta_nostaph_filtered.norm, Body_Site != "forearm")
+
+# Merge all other sites 
+
+subjects = unique(meta_nostaph_filtered.norm_noforearm$Subject)
+nostaph_subjects_merged_without_forearm = data.frame()
+meta_nostaph_subjects_merged_without_forearm = data.frame()
+
+for (i in subjects){
+  if (!endsWith(i, "control")){
+    tps = unique(as.character((meta_nostaph_filtered.norm_noforearm[meta_nostaph_filtered.norm_noforearm$Subject==i,]$Visit)))
+    tps = tps[!is.na(tps)] 
+    for (visit in tps){
+      # visit = 1
+      mini_meta = subset(meta_nostaph_filtered.norm_noforearm, Subject ==i & Visit==visit)
+      samples = as.character(mini_meta$SampleName)
+      if (length(samples) >=1){
+      temp = nostaph_filtered.norm[rownames(nostaph_filtered.norm) %in% samples,]
+      means_otus = apply(temp, 2, FUN=mean)
+      temp = rbind(temp, means_otus)
+      rownames(temp)[nrow(temp)] = paste(i, "v", visit, sep ="_")
+      nostaph_subjects_merged_without_forearm = rbind(nostaph_subjects_merged_without_forearm, temp[nrow(temp),])
+      #now build metadata file
+      bleach = as.character(unique(mini_meta$ChlorineBath))
+      scorad = unique(mini_meta$ScoradTotal)
+      age_sub = unique(mini_meta$Age)
+      sex_sub = as.character(unique(mini_meta$Sex))
+      metatemp = data.frame("Subject" = i, "Visit" = visit, "ChlorineBath" = bleach , "ScoradTotal" = scorad, "Age"=age_sub , "Sex"=sex_sub, "SampleName" =paste(i, "v", visit, sep ="_") )
+      meta_nostaph_subjects_merged_without_forearm = rbind(meta_nostaph_subjects_merged_without_forearm, metatemp)}
+    } 
+  } else {
+      minimeta = subset(meta_nostaph_filtered.norm_noforearm, Subject ==i)
+       samples = as.character(minimeta$SampleName)
+      temp = nostaph_filtered.norm[rownames(nostaph_filtered.norm) %in% samples,]
+      means_otus = apply(temp, 2, FUN=mean)
+      temp = rbind(temp, means_otus)
+      rownames(temp)[nrow(temp)] = i
+      nostaph_subjects_merged_without_forearm = rbind(nostaph_subjects_merged_without_forearm, temp[nrow(temp),])
+       #now build metadata file
+      metatemp = data.frame("Subject" = i, "Visit" = NA, "ChlorineBath" = NA , "ScoradTotal" = NA, "Age"=NA, "Sex"=NA, "SampleName" = i)
+      meta_nostaph_subjects_merged_without_forearm = rbind(meta_nostaph_subjects_merged_without_forearm, metatemp)
+    }
+}
+
+rownames(meta_nostaph_subjects_merged_without_forearm) = meta_nostaph_subjects_merged_without_forearm$SampleName
+meta_nostaph_subjects_merged_without_forearm = subset(meta_nostaph_subjects_merged_without_forearm, SampleName %!in% bad_tps)
+
+nostaph_subjects_merged_without_forearm = nostaph_subjects_merged_without_forearm[rownames(nostaph_subjects_merged_without_forearm) %!in% bad_tps, ]
+
+
+
+# calculate shannon diversity
+
+shanon_nostaph = as.data.frame(diversity(nostaph_subjects_merged_without_forearm, index = "shannon", MARGIN = 1, base = exp(1)), row.names = rownames(nostaph_subjects_merged_without_forearm))
+colnames(shanon_nostaph) = "Shanon_div"
+shanon_nostaph$SampleName = rownames(shanon_nostaph)
+
+# add shannon info to our metadata df
+
+meta_noforearm_nostaph_shannon = merge(meta_nostaph_subjects_merged_without_forearm, shanon_nostaph, by = "SampleName")
+
+#Remove controls
+meta_noforearm_nostaph_shannon_nocontrols = meta_noforearm_nostaph_shannon[!endsWith(as.character(meta_noforearm_nostaph_shannon$SampleName), "control"),]
+
+# Plot
+
+nostaph_spear_test_shanon = cor.test(meta_noforearm_nostaph_shannon_nocontrols$ScoradTotal, meta_noforearm_nostaph_shannon_nocontrols$Shanon_div, method = "spearman")
+
+
+rhoval_shanon_nostaph = as.numeric(nostaph_spear_test_shanon$estimate)
+
+shanon_nostaph_scatter = ggplot(na.omit(meta_noforearm_nostaph_shannon_nocontrols), aes(y=Shanon_div, x = ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("rho:", round(rhoval_shanon_nostaph, digits =3)), x = 60, y = 1, color = "grey40", size = 8)+
+  labs(x = "SCORAD", y = "Shannon diversity")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=15),  axis.text.y = element_text(size = 15, hjust = -0.5), axis.ticks.length.y = unit(0.25, "cm"))
+
+
+ggsave(paste(image_outdir, "supp_fig3_shanon_nostaph_scatter.pdf", sep = "/"), shanon_nostaph_scatter, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+
+
+ggsave(paste(image_outdir, "supp_fig3_shanon_nostaph_scatter.png", sep = "/"), shanon_nostaph_scatter, device = "png", dpi = 300)
+
+shanon_nostaph_scatter
+
+#Compare to controls
+
+meta_noforearm_nostaph_shannon$Group = sapply(meta_noforearm_nostaph_shannon$Subject, function(x) {ifelse(endsWith(as.character(x), "control"), "Healthy_Control", "AD_Patient")})
+
+shanon_nostaph_box = ggplot(meta_noforearm_nostaph_shannon, aes(x =Group, y = Shanon_div))+
+  geom_boxplot(position = "dodge", color = "grey40", outlier.colour = NA)+
+  geom_jitter(width = 0.2, size = 2)+
+  geom_signif(comparisons = list(c("Healthy_Control", "AD_Patient")), test = wilcox.test)+
+  labs(y = "Alpha diversity (Shannon)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(), axis.line = element_line())
+
+ggsave(paste(image_outdir, "supp_fig3_shanon_nostaph_box.pdf", sep = "/"), shanon_nostaph_box, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+
+
+ggsave(paste(image_outdir, "supp_fig3_shanon_nostaph_box.png", sep = "/"), shanon_nostaph_box, device = "png", dpi = 300)
+
+
+
+```
+
+#### Non-aureus Staph correlations
+
+```{r}
+
+#Grab the relative abundances of different useful OTUs in all samples 
+
+#Grab info on the % of relevant bugs in all samples 
+no_s_aureus_correlations = data.frame()
+
+for (i in 1:nrow(nostaph_subjects_merged_without_forearm)){
+  samplename = rownames(nostaph_subjects_merged_without_forearm)[i]
+  staphepi = nostaph_subjects_merged_without_forearm[rownames(nostaph_subjects_merged_without_forearm)==samplename, "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis"]
+  staph_cap = nostaph_subjects_merged_without_forearm[rownames(nostaph_subjects_merged_without_forearm)==samplename,"Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis"]
+  staph_hom = nostaph_subjects_merged_without_forearm[rownames(nostaph_subjects_merged_without_forearm)==samplename,"Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.hominis"]
+  no_s_aureus_correlations = rbind(no_s_aureus_correlations, data.frame("Rel_Staph_epi" = staphepi, "Rel_Staph_Cap" = staph_cap, "Rel_Staph_hom" = staph_hom, row.names = samplename))
+}
+
+shannon_div_nostaph = cbind(shanon_nostaph, no_s_aureus_correlations)
+shannon_div_nostaph$SampleName = rownames(shannon_div_nostaph)
+
+nostaph_plot_corrs = merge(shannon_div_nostaph, meta_nostaph_subjects_merged_without_forearm, by = "SampleName")
+
+
+#These have been included for us in meta_of_interest
+staph_species_test =  c( "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.capitis", "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.epidermidis", "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.hominis")
+
+
+#Staph epi
+  
+  spear_test_epi = cor.test(nostaph_plot_corrs[,10], nostaph_plot_corrs[,3], method = "spearman")
+  rhoval_epi = as.numeric(spear_test_epi$estimate)
+  pval_epi = as.numeric(spear_test_epi$p.val)
+  
+epi_spear =   ggplot(nostaph_plot_corrs, aes(x = Rel_Staph_epi, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_epi, digits =3)), x = 0.3, y = 5, color = "grey40")+
+  # annotate("text", label = paste("pval", round(pval, digits =3)), x = 0.3, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph epi")
+  
+  
+  ggsave(paste(image_outdir, "s3_epi_SCORAD.png", sep = "/"), epi_spear, device = "png", dpi = 300)
+  
+  ggsave(paste(image_outdir, "s3_s_epi_SCORAD.pdf", sep = "/"), epi_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+  
+#Staph capitis
+  
+  
+spear_test_cap = cor.test(nostaph_plot_corrs[,10], nostaph_plot_corrs[,4], method = "spearman")
+  rhoval_cap = as.numeric(spear_test_cap$estimate)
+  pval_cap = as.numeric(spear_test_cap$p.val)
+  
+  cap_spear = ggplot(nostaph_plot_corrs, aes(x = Rel_Staph_Cap, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_cap, digits =3)), x = 0.5, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =3)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph capitis")
+  
+  ggsave(paste(image_outdir, "s3_s_cap_SCORAD.png", sep = "/"), cap_spear, device = "png", dpi = 300)
+   ggsave(paste(image_outdir, "s3_s_cap_SCORAD.pdf", sep = "/"), cap_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height = 5, width = 7)
+  
+  #Staph homini
+  
+  
+spear_test_hom = cor.test(nostaph_plot_corrs[,10], nostaph_plot_corrs[,5], method = "spearman")
+  rhoval_hom = as.numeric(spear_test_hom$estimate)
+  pval_hom = as.numeric(spear_test_hom$p.val)
+  
+  hom_spear = ggplot(nostaph_plot_corrs, aes(x = Rel_Staph_hom, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval_hom, digits =3)), x = 0.1, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =4)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "Staph hominis")
+
+  
+  ggsave(paste(image_outdir, "s3_s_hom_SCORAD.png", sep = "/"), hom_spear, device = "png", dpi = 300)
+  ggsave(paste(image_outdir, "s3_s_hom_SCORAD.pdf", sep = "/"), hom_spear, device = "pdf", dpi = 300, useDingbats = FALSE)
+
+
+
+
+
+#all staph OTHER than s. aureus
+
+all_staph_species = colnames(nostaph_subjects_merged_without_forearm)[grep("Staphylococcus", colnames(nostaph_subjects_merged_without_forearm))]
+#a vector of staph species to be merged
+all_staph_species = all_staph_species[ all_staph_species!= "Bacteria.Firmicutes.Bacilli.Bacillales.Staphylococcaceae.Staphylococcus.Staphylococcus.aureus"]
+
+# so there's a glitch in the tax table where Corynebacterium.diphtheriae is labelled as a staph species? we're removing it
+
+all_staph_species = all_staph_species[-1] #its the first element, alphabetically. 
+
+cat_staph = nostaph_subjects_merged_without_forearm[,colnames(nostaph_subjects_merged_without_forearm) %in% all_staph_species]
+cat_staph$concat_staph = rowSums(cat_staph)
+
+nostaph_plot_corrs = cbind(nostaph_plot_corrs, cat_staph$concat_staph)
+colnames(nostaph_plot_corrs)[12] = "Rel_all_Staph"
+
+spear_test = cor.test(nostaph_plot_corrs[,12], nostaph_plot_corrs[,10], method = "spearman")
+  rhoval = as.numeric(spear_test$estimate)
+  pval = as.numeric(spear_test$p.val)
+  
+  allstaph_spear = ggplot(nostaph_plot_corrs, aes(x = Rel_all_Staph, y=ScoradTotal))+
+  geom_point()+
+  annotate("text", label = paste("Spearman's Rho:", round(rhoval, digits =3)), x = 0.5, y = 5, color = "grey40")+
+    # annotate("text", label = paste("pval", round(pval, digits =4)), x = 0.5, y = 2, color = "grey40")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size=12), axis.text.y = element_text(size=12))+
+  labs(y = "SCORAD", x = "All Staph species")
+
+  
+  ggsave(paste(image_outdir, "s3_staph_specs_total_SCORAD.png", sep = "/"),  allstaph_spear, device = "png", dpi = 300)
+  
+    ggsave(paste(image_outdir, "s3_staph_specs_total_SCORAD.pdf", sep = "/"),  allstaph_spear, device = "pdf", dpi = 300, useDingbats = FALSE, height =5, width = 7)
+
+
+```
+
+#Potentially deprecated 
+
+Supplemental Table information
+
+```{r}
+
+bleach_conditions = c("Y", "N")
+
+
+ for (chlor in bleach_conditions){
+   chlor = "N"
+  visit1_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==1 & ChlorineBath == chlor))
+  visit2_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==2 & ChlorineBath == chlor))
+  visit3_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==3 & ChlorineBath == chlor))
+  visit4_samps = rownames(subset(meta_noforearm_nobadtps, Visit ==4 & ChlorineBath == chlor))
+  
+  all_chlor_samps = c(visit1_samps, visit2_samps, visit3_samps, visit4_samps)
+  
+  # Staph species 
+  
+  staph_loc = grep(c(".capitis|s.epidermidis|.aureus"), colnames(noforearm_nobadtps))
+  
+  staphs_df = as.data.frame(noforearm_nobadtps[,staph_loc])
+  rownames(staphs_df) = rownames(noforearm_nobadtps)
+  staphs_df = staphs_df[rownames(staphs_df) %in% all_chlor_samps,]
+  # staphs_df = staphs_df[!(endsWith(rownames(staphs_df), "control")),]
+  
+  #Get groups
+  staphs_df <- staphs_df %>%
+    rownames_to_column() %>%
+    mutate(Groups = case_when(rownames(staphs_df) %in% visit1_samps ~"Visit_1",
+                             rownames(staphs_df) %in% visit2_samps ~"Visit_2",
+                             rownames(staphs_df) %in% visit3_samps~"Visit_3",
+                             rownames(staphs_df) %in% visit4_samps ~"Visit_4")) %>%
+    column_to_rownames()
+  
+  staph_info = data.frame()
+  
+  for (i in 1:(length(colnames(staphs_df))-1)){
+    # i = 1
+    taxa = colnames(staphs_df)[i]
+    avg_v1 = mean(subset(staphs_df[,c(i,4)], Groups == "Visit_1")[,1]) * 100
+    avg_v4 = mean(subset(staphs_df[,c(i,4)], Groups == "Visit_4")[,1]) * 100
+    
+    #tests
+    p_v1_v4 = wilcox.test(subset(staphs_df[,c(i,4)], Groups == "Visit_1")[,1], subset(staphs_df[,c(i,4)], Groups =="Visit_4")[,1])
+    staph_info = rbind(staph_info, data.frame("Taxa" = taxa, "Visit1" = avg_v1, "Visit4" = avg_v4, "V4-V1" = avg_v4-avg_v1,  "P_Visit_Diff" = as.numeric(p_v1_v4$p.value)))
+    
+  }
+
+# For things that are not staph
+
+  search_terms= c("Corynebacterium", "Micrococcus", "Cutibacterium", "Paracoccus", "Acinetobacter", "Bacteroidetes")
+  
+  taxa_of_interest_stats = list()
+  
+  for (i in search_terms){
+    # i = "Micrococcus"
+    specs_loc = grep(i, colnames(noforearm_nobadtps))
+    # specs = colnames(healthy_vs_patients_baseline)[specs_loc]
+    specs_df = data.frame(noforearm_nobadtps[,specs_loc])
+    specs_df$Total_bug = rowSums(specs_df) 
+    colnames(specs_df)[ncol(specs_df)] = i
+    # taxa_of_interest_stats = cbind(taxa_of_interest_stats, data.frame(specs_df[,ncol(specs_df), drop=FALSE]))
+    taxa_of_interest_stats[[i]] = data.frame(specs_df[,ncol(specs_df), drop=FALSE])
+    
+  }
+  
+  
+  stats_df = as.data.frame(taxa_of_interest_stats)
+  stats_df = stats_df[rownames(stats_df) %in% all_chlor_samps,]
+  # stats_df = stats_df[!(endsWith(rownames(stats_df), "control")),]
+  
+  
+  stats_df <- stats_df %>%
+    rownames_to_column() %>%
+    mutate(Groups = case_when(rownames(staphs_df) %in% visit1_samps ~"Visit_1",
+                             rownames(staphs_df) %in% visit2_samps ~"Visit_2",
+                             rownames(staphs_df) %in% visit3_samps~"Visit_3",
+                             rownames(staphs_df) %in% visit4_samps ~"Visit_4")) %>%
+    column_to_rownames()
+  
+  
+  
+  stats_info = data.frame()
+  
+  for (i in 1:(length(colnames(stats_df))-1)){
+    # i = 1
+    taxa = colnames(stats_df)[i]
+    avg_v1 = mean(subset(stats_df[,c(i,7)], Groups == "Visit_1")[,1]) * 100
+    avg_v4 = mean(subset(stats_df[,c(i,7)], Groups == "Visit_4")[,1]) * 100
+    
+    #tests
+    p_v1_v4 = wilcox.test(subset(stats_df[,c(i,7)], Groups == "Visit_1")[,1], subset(stats_df[,c(i,7)], Groups =="Visit_4")[,1])
+    stats_info = rbind(stats_info, data.frame("Taxa" = taxa, "Visit1" = avg_v1, "Visit4" = avg_v4, "V4-V1" = avg_v4-avg_v1,  "P_Visit_Diff" = as.numeric(p_v1_v4$p.value)))
+    
+  }
+  
+  
+  big_info_table = rbind(staph_info, stats_info)
+  
+  write.csv(big_info_table, paste(file_dir, "/v1_to_v4_", chlor, "_comparisons.csv", sep = "") )
+}
+
+```
+
